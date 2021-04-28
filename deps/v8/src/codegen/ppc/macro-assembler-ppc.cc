@@ -12,6 +12,7 @@
 #include "src/codegen/callable.h"
 #include "src/codegen/code-factory.h"
 #include "src/codegen/external-reference-table.h"
+#include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/codegen/register-configuration.h"
 #include "src/debug/debug.h"
@@ -22,7 +23,10 @@
 #include "src/runtime/runtime.h"
 #include "src/snapshot/embedded/embedded-data.h"
 #include "src/snapshot/snapshot.h"
+
+#if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-code-manager.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 // Satisfy cpplint check, but don't include platform-specific header. It is
 // included recursively via macro-assembler.h.
@@ -439,7 +443,7 @@ void TurboAssembler::MultiPushV128(RegList dregs, Register location) {
       Simd128Register dreg = Simd128Register::from_code(i);
       stack_offset -= kSimd128Size;
       li(ip, Operand(stack_offset));
-      StoreSimd128(dreg, MemOperand(location, ip), r0, kScratchSimd128Reg);
+      StoreSimd128(dreg, MemOperand(location, ip));
     }
   }
 }
@@ -464,7 +468,7 @@ void TurboAssembler::MultiPopV128(RegList dregs, Register location) {
     if ((dregs & (1 << i)) != 0) {
       Simd128Register dreg = Simd128Register::from_code(i);
       li(ip, Operand(stack_offset));
-      LoadSimd128(dreg, MemOperand(location, ip), r0, kScratchSimd128Reg);
+      LoadSimd128(dreg, MemOperand(location, ip));
       stack_offset += kSimd128Size;
     }
   }
@@ -603,7 +607,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
   DCHECK(IsAligned(offset, kTaggedSize));
 
   Add(dst, object, offset - kHeapObjectTag, r0);
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     Label ok;
     andi(r0, dst, Operand(kTaggedSize - 1));
     beq(&ok, cr0);
@@ -618,7 +622,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
 
   // Clobber clobbered input registers when running with the debug-code flag
   // turned on to provoke errors.
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     mov(value, Operand(bit_cast<intptr_t>(kZapValue + 4)));
     mov(dst, Operand(bit_cast<intptr_t>(kZapValue + 8)));
   }
@@ -749,7 +753,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
                                  RememberedSetAction remembered_set_action,
                                  SmiCheck smi_check) {
   DCHECK(object != value);
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     LoadTaggedPointerField(r0, MemOperand(address));
     cmp(r0, value);
     Check(eq, AbortReason::kWrongAddressOrValuePassedToRecordWrite);
@@ -791,7 +795,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
 
   // Clobber clobbered registers when running with the debug-code flag
   // turned on to provoke errors.
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     mov(address, Operand(bit_cast<intptr_t>(kZapValue + 12)));
     mov(value, Operand(bit_cast<intptr_t>(kZapValue + 16)));
   }
@@ -1218,7 +1222,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
   // Reserve room for saved entry sp.
   subi(sp, fp, Operand(ExitFrameConstants::kFixedFrameSizeFromFp));
 
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     li(r8, Operand::Zero());
     StoreP(r8, MemOperand(fp, ExitFrameConstants::kSPOffset));
   }
@@ -1792,8 +1796,13 @@ void TurboAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
   // Put input on stack.
   stfdu(double_input, MemOperand(sp, -kDoubleSize));
 
+#if V8_ENABLE_WEBASSEMBLY
   if (stub_mode == StubCallMode::kCallWasmRuntimeStub) {
     Call(wasm::WasmCode::kDoubleToI, RelocInfo::WASM_STUB_CALL);
+#else
+  // For balance.
+  if (false) {
+#endif  // V8_ENABLE_WEBASSEMBLY
   } else {
     Call(BUILTIN_CODE(isolate, DoubleToI), RelocInfo::CODE_TARGET);
   }
@@ -1913,7 +1922,7 @@ void MacroAssembler::DecrementCounter(StatsCounter* counter, int value,
 }
 
 void TurboAssembler::Assert(Condition cond, AbortReason reason, CRegister cr) {
-  if (emit_debug_code()) Check(cond, reason, cr);
+  if (FLAG_debug_code) Check(cond, reason, cr);
 }
 
 void TurboAssembler::Check(Condition cond, AbortReason reason, CRegister cr) {
@@ -1927,11 +1936,11 @@ void TurboAssembler::Check(Condition cond, AbortReason reason, CRegister cr) {
 void TurboAssembler::Abort(AbortReason reason) {
   Label abort_start;
   bind(&abort_start);
-#ifdef DEBUG
-  const char* msg = GetAbortReason(reason);
-  RecordComment("Abort message: ");
-  RecordComment(msg);
-#endif
+  if (FLAG_code_comments) {
+    const char* msg = GetAbortReason(reason);
+    RecordComment("Abort message: ");
+    RecordComment(msg);
+  }
 
   // Avoid emitting call to builtin if requested.
   if (trap_on_abort()) {
@@ -1967,7 +1976,7 @@ void TurboAssembler::LoadMap(Register destination, Register object) {
                          FieldMemOperand(object, HeapObject::kMapOffset));
 }
 
-void MacroAssembler::LoadNativeContextSlot(int index, Register dst) {
+void MacroAssembler::LoadNativeContextSlot(Register dst, int index) {
   LoadMap(dst, cp);
   LoadTaggedPointerField(
       dst, FieldMemOperand(
@@ -1976,7 +1985,7 @@ void MacroAssembler::LoadNativeContextSlot(int index, Register dst) {
 }
 
 void MacroAssembler::AssertNotSmi(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     TestIfSmi(object, r0);
     Check(ne, AbortReason::kOperandIsASmi, cr0);
@@ -1984,7 +1993,7 @@ void MacroAssembler::AssertNotSmi(Register object) {
 }
 
 void MacroAssembler::AssertSmi(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     TestIfSmi(object, r0);
     Check(eq, AbortReason::kOperandIsNotASmi, cr0);
@@ -1992,7 +2001,7 @@ void MacroAssembler::AssertSmi(Register object) {
 }
 
 void MacroAssembler::AssertConstructor(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     TestIfSmi(object, r0);
     Check(ne, AbortReason::kOperandIsASmiAndNotAConstructor, cr0);
@@ -2006,7 +2015,7 @@ void MacroAssembler::AssertConstructor(Register object) {
 }
 
 void MacroAssembler::AssertFunction(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     TestIfSmi(object, r0);
     Check(ne, AbortReason::kOperandIsASmiAndNotAFunction, cr0);
@@ -2020,7 +2029,7 @@ void MacroAssembler::AssertFunction(Register object) {
 }
 
 void MacroAssembler::AssertBoundFunction(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     TestIfSmi(object, r0);
     Check(ne, AbortReason::kOperandIsASmiAndNotABoundFunction, cr0);
@@ -2032,7 +2041,7 @@ void MacroAssembler::AssertBoundFunction(Register object) {
 }
 
 void MacroAssembler::AssertGeneratorObject(Register object) {
-  if (!emit_debug_code()) return;
+  if (!FLAG_debug_code) return;
   TestIfSmi(object, r0);
   Check(ne, AbortReason::kOperandIsASmiAndNotAGeneratorObject, cr0);
 
@@ -2062,7 +2071,7 @@ void MacroAssembler::AssertGeneratorObject(Register object) {
 
 void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
                                                      Register scratch) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     Label done_checking;
     AssertNotSmi(object);
     CompareRoot(object, RootIndex::kUndefinedValue);
@@ -2984,22 +2993,8 @@ void TurboAssembler::LoadSingleU(DoubleRegister dst, const MemOperand& mem,
   }
 }
 
-void TurboAssembler::LoadSimd128(Simd128Register dst, const MemOperand& mem,
-                                 Register ScratchReg,
-                                 Simd128Register ScratchDoubleReg) {
-  // lvx needs the stack to be 16 byte aligned.
-  // We first use lxvd/stxvd to copy the content on an aligned address. lxvd
-  // itself reverses the lanes so it cannot be used as is.
-  lxvd(ScratchDoubleReg, mem);
-  mr(ScratchReg, sp);
-  ClearRightImm(
-      sp, sp,
-      Operand(base::bits::WhichPowerOfTwo(16)));  // equivalent to &= -16
-  addi(sp, sp, Operand(-16));
-  stxvd(ScratchDoubleReg, MemOperand(r0, sp));
-  // Load it with correct lane ordering.
-  lvx(dst, MemOperand(r0, sp));
-  mr(sp, ScratchReg);
+void TurboAssembler::LoadSimd128(Simd128Register dst, const MemOperand& mem) {
+  lxvx(dst, mem);
 }
 
 void TurboAssembler::StoreDouble(DoubleRegister src, const MemOperand& mem,
@@ -3054,21 +3049,8 @@ void TurboAssembler::StoreSingleU(DoubleRegister src, const MemOperand& mem,
   }
 }
 
-void TurboAssembler::StoreSimd128(Simd128Register src, const MemOperand& mem,
-                                  Register ScratchReg,
-                                  Simd128Register ScratchDoubleReg) {
-  // stvx needs the stack to be 16 byte aligned.
-  // We use lxvd/stxvd to store the content on an aligned address. stxvd
-  // itself reverses the lanes so it cannot be used as is.
-  mr(ScratchReg, sp);
-  ClearRightImm(
-      sp, sp,
-      Operand(base::bits::WhichPowerOfTwo(16)));  // equivalent to &= -16
-  addi(sp, sp, Operand(-16));
-  stvx(src, MemOperand(r0, sp));
-  lxvd(ScratchDoubleReg, MemOperand(r0, sp));
-  mr(sp, ScratchReg);
-  stxvd(ScratchDoubleReg, mem);
+void TurboAssembler::StoreSimd128(Simd128Register src, const MemOperand& mem) {
+  stxvx(src, mem);
 }
 
 Register GetRegisterThatIsNotOneOf(Register reg1, Register reg2, Register reg3,
@@ -3210,13 +3192,13 @@ void TurboAssembler::SwapSimd128(Simd128Register src, MemOperand dst,
   DCHECK(src != scratch);
   // push v0, to be used as scratch
   addi(sp, sp, Operand(-kSimd128Size));
-  StoreSimd128(v0, MemOperand(r0, sp), r0, scratch);
+  StoreSimd128(v0, MemOperand(r0, sp));
   mov(ip, Operand(dst.offset()));
-  LoadSimd128(v0, MemOperand(dst.ra(), ip), r0, scratch);
-  StoreSimd128(src, MemOperand(dst.ra(), ip), r0, scratch);
+  LoadSimd128(v0, MemOperand(dst.ra(), ip));
+  StoreSimd128(src, MemOperand(dst.ra(), ip));
   vor(src, v0, v0);
   // restore v0
-  LoadSimd128(v0, MemOperand(r0, sp), ip, scratch);
+  LoadSimd128(v0, MemOperand(r0, sp));
   addi(sp, sp, Operand(kSimd128Size));
 }
 
@@ -3224,23 +3206,23 @@ void TurboAssembler::SwapSimd128(MemOperand src, MemOperand dst,
                                  Simd128Register scratch) {
   // push v0 and v1, to be used as scratch
   addi(sp, sp, Operand(2 * -kSimd128Size));
-  StoreSimd128(v0, MemOperand(r0, sp), ip, scratch);
+  StoreSimd128(v0, MemOperand(r0, sp));
   li(ip, Operand(kSimd128Size));
-  StoreSimd128(v1, MemOperand(ip, sp), r0, scratch);
+  StoreSimd128(v1, MemOperand(ip, sp));
 
   mov(ip, Operand(src.offset()));
-  LoadSimd128(v0, MemOperand(src.ra(), ip), r0, scratch);
+  LoadSimd128(v0, MemOperand(src.ra(), ip));
   mov(ip, Operand(dst.offset()));
-  LoadSimd128(v1, MemOperand(dst.ra(), ip), r0, scratch);
+  LoadSimd128(v1, MemOperand(dst.ra(), ip));
 
-  StoreSimd128(v0, MemOperand(dst.ra(), ip), r0, scratch);
+  StoreSimd128(v0, MemOperand(dst.ra(), ip));
   mov(ip, Operand(src.offset()));
-  StoreSimd128(v1, MemOperand(src.ra(), ip), r0, scratch);
+  StoreSimd128(v1, MemOperand(src.ra(), ip));
 
   // restore v0 and v1
-  LoadSimd128(v0, MemOperand(r0, sp), ip, scratch);
+  LoadSimd128(v0, MemOperand(r0, sp));
   li(ip, Operand(kSimd128Size));
-  LoadSimd128(v1, MemOperand(ip, sp), r0, scratch);
+  LoadSimd128(v1, MemOperand(ip, sp));
   addi(sp, sp, Operand(2 * kSimd128Size));
 }
 

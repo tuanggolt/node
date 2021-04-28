@@ -72,7 +72,8 @@ class BytecodeGraphBuilder {
 
   CodeKind code_kind() const { return code_kind_; }
   bool native_context_independent() const {
-    return CodeKindIsNativeContextIndependentJSFunction(code_kind_);
+    // TODO(jgruber,v8:8888): Remove dependent code.
+    return false;
   }
   bool is_turboprop() const { return code_kind_ == CodeKind::TURBOPROP; }
   bool generate_full_feedback_collection() const {
@@ -1569,7 +1570,7 @@ void BytecodeGraphBuilder::VisitBytecodes() {
   }
 
   // TODO(leszeks): Increment usage counter on BG thread.
-  if (!FLAG_concurrent_inlining && has_one_shot_bytecode) {
+  if (!broker()->is_concurrent_inlining() && has_one_shot_bytecode) {
     // (For concurrent inlining this is done in the serializer instead.)
     isolate()->CountUsage(
         v8::Isolate::UseCounterFeature::kOptimizedFunctionWithOneShotBytecode);

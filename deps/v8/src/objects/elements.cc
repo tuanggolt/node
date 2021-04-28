@@ -154,10 +154,11 @@ MaybeHandle<Object> ThrowArrayLengthRangeError(Isolate* isolate) {
                   Object);
 }
 
-WriteBarrierMode GetWriteBarrierMode(ElementsKind kind) {
+WriteBarrierMode GetWriteBarrierMode(FixedArrayBase elements, ElementsKind kind,
+                                     const DisallowGarbageCollection& promise) {
   if (IsSmiElementsKind(kind)) return SKIP_WRITE_BARRIER;
   if (IsDoubleElementsKind(kind)) return SKIP_WRITE_BARRIER;
-  return UPDATE_WRITE_BARRIER;
+  return elements.GetWriteBarrierMode(promise);
 }
 
 // If kCopyToEndAndInitializeToHole is specified as the copy_size to
@@ -226,7 +227,7 @@ void CopyDictionaryToObjectElements(Isolate* isolate, FixedArrayBase from_base,
   if (to_start + copy_size > to_length) {
     copy_size = to_length - to_start;
   }
-  WriteBarrierMode write_barrier_mode = GetWriteBarrierMode(to_kind);
+  WriteBarrierMode write_barrier_mode = GetWriteBarrierMode(to, to_kind, no_gc);
   for (int i = 0; i < copy_size; i++) {
     InternalIndex entry = from.FindEntry(isolate, i + from_start);
     if (entry.is_found()) {
@@ -780,7 +781,7 @@ class ElementsAccessorBase : public InternalElementsAccessor {
     if (IsDoubleElementsKind(kind())) {
       new_elements = isolate->factory()->NewFixedDoubleArray(capacity);
     } else {
-      new_elements = isolate->factory()->NewUninitializedFixedArray(capacity);
+      new_elements = isolate->factory()->NewFixedArray(capacity);
     }
 
     int packed_size = kPackedSizeNotKnown;
@@ -1420,10 +1421,10 @@ class DictionaryElementsAccessor
     DisallowGarbageCollection no_gc;
     NumberDictionary dict = NumberDictionary::cast(backing_store);
     if (!dict.requires_slow_elements()) return false;
-    IsolateRoot isolate = GetIsolateForPtrCompr(holder);
-    ReadOnlyRoots roots = holder.GetReadOnlyRoots(isolate);
+    PtrComprCageBase cage_base = GetPtrComprCageBase(holder);
+    ReadOnlyRoots roots = holder.GetReadOnlyRoots(cage_base);
     for (InternalIndex i : dict.IterateEntries()) {
-      Object key = dict.KeyAt(isolate, i);
+      Object key = dict.KeyAt(cage_base, i);
       if (!dict.IsKey(roots, key)) continue;
       PropertyDetails details = dict.DetailsAt(i);
       if (details.kind() == kAccessor) return true;
@@ -1903,12 +1904,10 @@ class FastElementsAccessor : public ElementsAccessorBase<Subclass, KindTraits> {
     backing_store->set_the_hole(isolate, entry);
 
     // TODO(verwaest): Move this out of elements.cc.
-    // If an old space backing store is larger than a certain size and
+    // If the backing store is larger than a certain size and
     // has too few used values, normalize it.
     const int kMinLengthForSparsenessCheck = 64;
     if (backing_store->length() < kMinLengthForSparsenessCheck) return;
-    // TODO(ulan): Check if it works with young large objects.
-    if (ObjectInYoungGeneration(*backing_store)) return;
     uint32_t length = 0;
     if (obj->IsJSArray()) {
       JSArray::cast(*obj).length().ToArrayLength(&length);
@@ -2113,25 +2112,26 @@ class FastElementsAccessor : public ElementsAccessorBase<Subclass, KindTraits> {
                            Handle<FixedArrayBase> backing_store, int dst_index,
                            int src_index, int len, int hole_start,
                            int hole_end) {
-    Handle<BackingStore> dst_elms = Handle<BackingStore>::cast(backing_store);
+    DisallowGarbageCollection no_gc;
+    BackingStore dst_elms = BackingStore::cast(*backing_store);
     if (len > JSArray::kMaxCopyElements && dst_index == 0 &&
-        isolate->heap()->CanMoveObjectStart(*dst_elms)) {
+        isolate->heap()->CanMoveObjectStart(dst_elms)) {
+      dst_elms = BackingStore::cast(
+          isolate->heap()->LeftTrimFixedArray(dst_elms, src_index));
       // Update all the copies of this backing_store handle.
-      *dst_elms.location() =
-          BackingStore::cast(
-              isolate->heap()->LeftTrimFixedArray(*dst_elms, src_index))
-              .ptr();
-      receiver->set_elements(*dst_elms);
+      *backing_store.location() = dst_elms.ptr();
+      receiver->set_elements(dst_elms);
       // Adjust the hole offset as the array has been shrunk.
       hole_end -= src_index;
       DCHECK_LE(hole_start, backing_store->length());
       DCHECK_LE(hole_end, backing_store->length());
     } else if (len != 0) {
-      WriteBarrierMode mode = GetWriteBarrierMode(KindTraits::Kind);
-      dst_elms->MoveElements(isolate, dst_index, src_index, len, mode);
+      WriteBarrierMode mode =
+          GetWriteBarrierMode(dst_elms, KindTraits::Kind, no_gc);
+      dst_elms.MoveElements(isolate, dst_index, src_index, len, mode);
     }
     if (hole_start != hole_end) {
-      dst_elms->FillWithHoles(hole_start, hole_end);
+      dst_elms.FillWithHoles(hole_start, hole_end);
     }
   }
 

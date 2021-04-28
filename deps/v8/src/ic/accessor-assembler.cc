@@ -8,6 +8,7 @@
 #include "src/base/optional.h"
 #include "src/builtins/builtins-constructor-gen.h"
 #include "src/codegen/code-factory.h"
+#include "src/codegen/interface-descriptors-inl.h"
 #include "src/ic/handler-configuration.h"
 #include "src/ic/ic.h"
 #include "src/ic/keyed-store-generic.h"
@@ -16,6 +17,7 @@
 #include "src/objects/cell.h"
 #include "src/objects/foreign.h"
 #include "src/objects/heap-number.h"
+#include "src/objects/megadom-handler.h"
 #include "src/objects/module.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/property-details.h"
@@ -23,9 +25,6 @@
 
 namespace v8 {
 namespace internal {
-
-using compiler::CodeAssemblerState;
-using compiler::Node;
 
 //////////////////// Private helpers.
 
@@ -135,6 +134,55 @@ void AccessorAssembler::HandlePolymorphicCase(
     Branch(IntPtrGreaterThanOrEqual(var_index.value(), IntPtrConstant(0)),
            &loop, if_miss);
   }
+}
+
+void AccessorAssembler::TryMegaDOMCase(TNode<Object> lookup_start_object,
+                                       TNode<Map> lookup_start_object_map,
+                                       TVariable<MaybeObject>* var_handler,
+                                       TNode<Object> vector,
+                                       TNode<TaggedIndex> slot, Label* miss,
+                                       ExitPoint* exit_point) {
+  // Check if the receiver is a JS_API_OBJECT
+  GotoIfNot(IsJSApiObjectMap(lookup_start_object_map), miss);
+
+  // Check if receiver requires access check
+  GotoIf(IsSetWord32<Map::Bits1::IsAccessCheckNeededBit>(
+             LoadMapBitField(lookup_start_object_map)),
+         miss);
+
+  CSA_ASSERT(this, TaggedEqual(LoadFeedbackVectorSlot(CAST(vector), slot),
+                               MegaDOMSymbolConstant()));
+
+  // In some cases, we load the
+  TNode<MegaDomHandler> handler;
+  if (var_handler->IsBound()) {
+    handler = CAST(var_handler->value());
+  } else {
+    TNode<MaybeObject> maybe_handler =
+        LoadFeedbackVectorSlot(CAST(vector), slot, kTaggedSize);
+    CSA_ASSERT(this, IsStrong(maybe_handler));
+    handler = CAST(maybe_handler);
+  }
+
+  // Check if dom protector cell is still valid
+  GotoIf(IsMegaDOMProtectorCellInvalid(), miss);
+
+  // Load the getter
+  TNode<MaybeObject> maybe_getter = LoadMegaDomHandlerAccessor(handler);
+  CSA_ASSERT(this, IsWeakOrCleared(maybe_getter));
+  TNode<FunctionTemplateInfo> getter =
+      CAST(GetHeapObjectAssumeWeak(maybe_getter, miss));
+
+  // Load the accessor context
+  TNode<MaybeObject> maybe_context = LoadMegaDomHandlerContext(handler);
+  CSA_ASSERT(this, IsWeakOrCleared(maybe_context));
+  TNode<Context> context = CAST(GetHeapObjectAssumeWeak(maybe_context, miss));
+
+  // TODO(gsathya): This builtin throws an exception on interface check fail but
+  // we should miss to the runtime.
+  exit_point->Return(
+      CallBuiltin(Builtins::kCallFunctionTemplate_CheckCompatibleReceiver,
+                  context, getter, IntPtrConstant(0), lookup_start_object));
 }
 
 void AccessorAssembler::HandleLoadICHandlerCase(
@@ -392,7 +440,7 @@ void AccessorAssembler::HandleLoadICSmiHandlerCase(
       if (Is64()) {
         GotoIfNot(
             UintPtrLessThanOrEqual(var_intptr_index.value(),
-                                   IntPtrConstant(JSArray::kMaxArrayIndex)),
+                                   IntPtrConstant(JSObject::kMaxElementIndex)),
             miss);
       } else {
         GotoIf(IntPtrLessThan(var_intptr_index.value(), IntPtrConstant(0)),
@@ -532,17 +580,18 @@ void AccessorAssembler::HandleLoadICSmiHandlerLoadNamedCase(
   BIND(&normal);
   {
     Comment("load_normal");
-    TNode<NameDictionary> properties = CAST(LoadSlowProperties(CAST(holder)));
+    TNode<PropertyDictionary> properties =
+        CAST(LoadSlowProperties(CAST(holder)));
     TVARIABLE(IntPtrT, var_name_index);
     Label found(this, &var_name_index);
-    NameDictionaryLookup<NameDictionary>(properties, CAST(p->name()), &found,
-                                         &var_name_index, miss);
+    NameDictionaryLookup<PropertyDictionary>(properties, CAST(p->name()),
+                                             &found, &var_name_index, miss);
     BIND(&found);
     {
       TVARIABLE(Uint32T, var_details);
       TVARIABLE(Object, var_value);
-      LoadPropertyFromNameDictionary(properties, var_name_index.value(),
-                                     &var_details, &var_value);
+      LoadPropertyFromDictionary<PropertyDictionary>(
+          properties, var_name_index.value(), &var_details, &var_value);
       TNode<Object> value = CallGetterIfAccessor(
           var_value.value(), CAST(holder), var_details.value(), p->context(),
           p->receiver(), miss);
@@ -743,11 +792,12 @@ void AccessorAssembler::HandleLoadICSmiHandlerHasNamedCase(
   BIND(&normal);
   {
     Comment("has_normal");
-    TNode<NameDictionary> properties = CAST(LoadSlowProperties(CAST(holder)));
+    TNode<PropertyDictionary> properties =
+        CAST(LoadSlowProperties(CAST(holder)));
     TVARIABLE(IntPtrT, var_name_index);
     Label found(this);
-    NameDictionaryLookup<NameDictionary>(properties, CAST(p->name()), &found,
-                                         &var_name_index, miss);
+    NameDictionaryLookup<PropertyDictionary>(properties, CAST(p->name()),
+                                             &found, &var_name_index, miss);
 
     BIND(&found);
     exit_point->Return(TrueConstant());
@@ -862,11 +912,6 @@ TNode<Object> AccessorAssembler::HandleProtoHandler(
 
       BIND(&if_lookup_on_lookup_start_object);
       {
-        if (V8_DICT_MODE_PROTOTYPES_BOOL) {
-          // TODO(v8:11167) remove once OrderedNameDictionary supported.
-          GotoIf(Int32TrueConstant(), miss);
-        }
-
         // Dictionary lookup on lookup start object is not necessary for
         // Load/StoreGlobalIC (which is the only case when the
         // lookup_start_object can be a JSGlobalObject) because prototype
@@ -876,12 +921,12 @@ TNode<Object> AccessorAssembler::HandleProtoHandler(
                    Word32BinaryNot(HasInstanceType(
                        CAST(p->lookup_start_object()), JS_GLOBAL_OBJECT_TYPE)));
 
-        TNode<NameDictionary> properties =
+        TNode<PropertyDictionary> properties =
             CAST(LoadSlowProperties(CAST(p->lookup_start_object())));
         TVARIABLE(IntPtrT, var_name_index);
         Label found(this, &var_name_index);
-        NameDictionaryLookup<NameDictionary>(properties, CAST(p->name()),
-                                             &found, &var_name_index, &done);
+        NameDictionaryLookup<PropertyDictionary>(
+            properties, CAST(p->name()), &found, &var_name_index, &done);
         BIND(&found);
         {
           if (on_found_on_lookup_start_object) {
@@ -908,14 +953,14 @@ void AccessorAssembler::HandleLoadICProtoHandler(
       // Code sub-handlers are not expected in LoadICs, so no |on_code_handler|.
       nullptr,
       // on_found_on_lookup_start_object
-      [=](TNode<NameDictionary> properties, TNode<IntPtrT> name_index) {
+      [=](TNode<PropertyDictionary> properties, TNode<IntPtrT> name_index) {
         if (access_mode == LoadAccessMode::kHas) {
           exit_point->Return(TrueConstant());
         } else {
           TVARIABLE(Uint32T, var_details);
           TVARIABLE(Object, var_value);
-          LoadPropertyFromNameDictionary(properties, name_index, &var_details,
-                                         &var_value);
+          LoadPropertyFromDictionary<PropertyDictionary>(
+              properties, name_index, &var_details, &var_value);
           TNode<Object> value = CallGetterIfAccessor(
               var_value.value(), CAST(var_holder->value()), var_details.value(),
               p->context(), p->receiver(), miss);
@@ -1054,11 +1099,12 @@ void AccessorAssembler::HandleStoreICHandlerCase(
            &if_slow);
     CSA_ASSERT(this,
                Word32Equal(handler_kind, Int32Constant(StoreHandler::kNormal)));
-    TNode<NameDictionary> properties = CAST(LoadSlowProperties(CAST(holder)));
+    TNode<PropertyDictionary> properties =
+        CAST(LoadSlowProperties(CAST(holder)));
 
     TVARIABLE(IntPtrT, var_name_index);
     Label dictionary_found(this, &var_name_index);
-    NameDictionaryLookup<NameDictionary>(
+    NameDictionaryLookup<PropertyDictionary>(
         properties, CAST(p->name()), &dictionary_found, &var_name_index, miss);
     BIND(&dictionary_found);
     {
@@ -1075,8 +1121,8 @@ void AccessorAssembler::HandleStoreICHandlerCase(
         GotoIf(IsPropertyDetailsConst(details), &if_constant);
       }
 
-      StoreValueByKeyIndex<NameDictionary>(properties, var_name_index.value(),
-                                           p->value());
+      StoreValueByKeyIndex<PropertyDictionary>(
+          properties, var_name_index.value(), p->value());
       Return(p->value());
 
       if (V8_DICT_PROPERTY_CONST_TRACKING_BOOL) {
@@ -1512,7 +1558,6 @@ void AccessorAssembler::HandleStoreAccessor(const StoreICParameters* p,
       LoadObjectField(accessor_pair, AccessorPair::kSetterOffset);
   CSA_ASSERT(this, Word32BinaryNot(IsTheHole(setter)));
 
-  Callable callable = CodeFactory::Call(isolate());
   Return(Call(p->context(), setter, p->receiver(), p->value()));
 }
 
@@ -1555,7 +1600,7 @@ void AccessorAssembler::HandleStoreICProtoHandler(
   TNode<Object> smi_handler = HandleProtoHandler<StoreHandler>(
       p, handler, on_code_handler,
       // on_found_on_lookup_start_object
-      [=](TNode<NameDictionary> properties, TNode<IntPtrT> name_index) {
+      [=](TNode<PropertyDictionary> properties, TNode<IntPtrT> name_index) {
         TNode<Uint32T> details = LoadDetailsByKeyIndex(properties, name_index);
         // Check that the property is a writable data property (no accessor).
         const int kTypeAndReadOnlyMask =
@@ -1564,8 +1609,8 @@ void AccessorAssembler::HandleStoreICProtoHandler(
         STATIC_ASSERT(kData == 0);
         GotoIf(IsSetWord32(details, kTypeAndReadOnlyMask), miss);
 
-        StoreValueByKeyIndex<NameDictionary>(properties, name_index,
-                                             p->value());
+        StoreValueByKeyIndex<PropertyDictionary>(properties, name_index,
+                                                 p->value());
         Return(p->value());
       },
       miss, ic_mode);
@@ -1636,9 +1681,9 @@ void AccessorAssembler::HandleStoreICProtoHandler(
       TNode<Map> receiver_map = LoadMap(CAST(p->receiver()));
       InvalidateValidityCellIfPrototype(receiver_map);
 
-      TNode<NameDictionary> properties =
+      TNode<PropertyDictionary> properties =
           CAST(LoadSlowProperties(CAST(p->receiver())));
-      Add<NameDictionary>(properties, CAST(p->name()), p->value(), &slow);
+      Add<PropertyDictionary>(properties, CAST(p->name()), p->value(), &slow);
       Return(p->value());
 
       BIND(&slow);
@@ -2137,7 +2182,7 @@ void AccessorAssembler::EmitElementLoad(
     {
       Comment("dictionary elements");
       if (Is64()) {
-        GotoIf(UintPtrLessThan(IntPtrConstant(JSArray::kMaxArrayIndex),
+        GotoIf(UintPtrLessThan(IntPtrConstant(JSObject::kMaxElementIndex),
                                intptr_index),
                out_of_bounds);
       } else {
@@ -2328,11 +2373,11 @@ void AccessorAssembler::GenericElementLoad(
     // without ever checking the prototype chain.
     GotoIf(IsJSTypedArrayInstanceType(lookup_start_object_instance_type),
            &return_undefined);
-    // Positive OOB indices within JSArray index range are effectively the same
+    // Positive OOB indices within elements index range are effectively the same
     // as hole loads. Larger keys and negative keys are named loads.
     if (Is64()) {
       Branch(UintPtrLessThanOrEqual(index,
-                                    IntPtrConstant(JSArray::kMaxArrayIndex)),
+                                    IntPtrConstant(JSObject::kMaxElementIndex)),
              &if_element_hole, slow);
     } else {
       Branch(IntPtrLessThan(index, IntPtrConstant(0)), slow, &if_element_hole);
@@ -2442,26 +2487,21 @@ void AccessorAssembler::GenericPropertyLoad(
 
   BIND(&if_property_dictionary);
   {
-    if (V8_DICT_MODE_PROTOTYPES_BOOL) {
-      // TODO(v8:11167) remove once OrderedNameDictionary supported.
-      GotoIf(Int32TrueConstant(), slow);
-    }
-
     Comment("dictionary property load");
     // We checked for LAST_CUSTOM_ELEMENTS_RECEIVER before, which rules out
     // seeing global objects here (which would need special handling).
 
     TVARIABLE(IntPtrT, var_name_index);
     Label dictionary_found(this, &var_name_index);
-    TNode<NameDictionary> properties =
+    TNode<PropertyDictionary> properties =
         CAST(LoadSlowProperties(CAST(lookup_start_object)));
-    NameDictionaryLookup<NameDictionary>(properties, name, &dictionary_found,
-                                         &var_name_index,
-                                         &lookup_prototype_chain);
+    NameDictionaryLookup<PropertyDictionary>(properties, name,
+                                             &dictionary_found, &var_name_index,
+                                             &lookup_prototype_chain);
     BIND(&dictionary_found);
     {
-      LoadPropertyFromNameDictionary(properties, var_name_index.value(),
-                                     &var_details, &var_value);
+      LoadPropertyFromDictionary<PropertyDictionary>(
+          properties, var_name_index.value(), &var_details, &var_value);
       Goto(&if_found_on_lookup_start_object);
     }
   }
@@ -2874,11 +2914,23 @@ void AccessorAssembler::LoadIC_Noninlined(const LoadICParameters* p,
   DCHECK_EQ(MachineRepresentation::kTagged, var_handler->rep());
 
   {
-    // Check megamorphic case.
-    GotoIfNot(TaggedEqual(feedback, MegamorphicSymbolConstant()), miss);
+    Label try_megamorphic(this), try_megadom(this);
+    GotoIf(TaggedEqual(feedback, MegamorphicSymbolConstant()),
+           &try_megamorphic);
+    GotoIf(TaggedEqual(feedback, MegaDOMSymbolConstant()), &try_megadom);
+    Goto(miss);
 
-    TryProbeStubCache(isolate()->load_stub_cache(), p->lookup_start_object(),
-                      CAST(p->name()), if_handler, var_handler, miss);
+    BIND(&try_megamorphic);
+    {
+      TryProbeStubCache(isolate()->load_stub_cache(), p->lookup_start_object(),
+                        CAST(p->name()), if_handler, var_handler, miss);
+    }
+
+    BIND(&try_megadom);
+    {
+      TryMegaDOMCase(p->lookup_start_object(), lookup_start_object_map,
+                     var_handler, p->vector(), p->slot(), miss, exit_point);
+    }
   }
 }
 

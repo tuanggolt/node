@@ -37,11 +37,11 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
       std::vector<FunctionLiteral*>* eager_inner_literals);
 
   void GenerateBytecode(uintptr_t stack_limit);
-  template <typename LocalIsolate>
-  Handle<BytecodeArray> FinalizeBytecode(LocalIsolate* isolate,
+  template <typename IsolateT>
+  Handle<BytecodeArray> FinalizeBytecode(IsolateT* isolate,
                                          Handle<Script> script);
-  template <typename LocalIsolate>
-  Handle<ByteArray> FinalizeSourcePositionTable(LocalIsolate* isolate);
+  template <typename IsolateT>
+  Handle<ByteArray> FinalizeSourcePositionTable(IsolateT* isolate);
 
 #ifdef DEBUG
   int CheckBytecodeMatches(BytecodeArray bytecode);
@@ -165,8 +165,8 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
   };
 
   void GenerateBytecodeBody();
-  template <typename LocalIsolate>
-  void AllocateDeferredConstants(LocalIsolate* isolate, Handle<Script> script);
+  template <typename IsolateT>
+  void AllocateDeferredConstants(IsolateT* isolate, Handle<Script> script);
 
   DEFINE_AST_VISITOR_SUBCLASS_MEMBERS();
 
@@ -252,8 +252,8 @@ class BytecodeGenerator final : public AstVisitor<BytecodeGenerator> {
       LookupHoistingMode lookup_hoisting_mode = LookupHoistingMode::kNormal);
   void BuildLiteralCompareNil(Token::Value compare_op,
                               BytecodeArrayBuilder::NilValue nil);
-  void BuildReturn(int source_position = kNoSourcePosition);
-  void BuildAsyncReturn(int source_position = kNoSourcePosition);
+  void BuildReturn(int source_position);
+  void BuildAsyncReturn(int source_position);
   void BuildAsyncGeneratorReturn();
   void BuildReThrow();
   void BuildHoleCheckForVariableAssignment(Variable* variable, Token::Value op);

@@ -54,6 +54,7 @@ static bool IsPropertyNameFeedback(MaybeObject feedback) {
   Symbol symbol = Symbol::cast(heap_object);
   ReadOnlyRoots roots = symbol.GetReadOnlyRoots();
   return symbol != roots.uninitialized_symbol() &&
+         symbol != roots.mega_dom_symbol() &&
          symbol != roots.megamorphic_symbol();
 }
 
@@ -75,8 +76,8 @@ void FeedbackMetadata::SetKind(FeedbackSlot slot, FeedbackSlotKind kind) {
 }
 
 // static
-template <typename LocalIsolate>
-Handle<FeedbackMetadata> FeedbackMetadata::New(LocalIsolate* isolate,
+template <typename IsolateT>
+Handle<FeedbackMetadata> FeedbackMetadata::New(IsolateT* isolate,
                                                const FeedbackVectorSpec* spec) {
   auto* factory = isolate->factory();
 
@@ -253,8 +254,6 @@ Handle<FeedbackVector> FeedbackVector::New(
   DCHECK_EQ(vector->optimization_marker(),
             FLAG_log_function_events ? OptimizationMarker::kLogFirstExecution
                                      : OptimizationMarker::kNone);
-  // TODO(mythria): This might change if NCI code is installed on feedback
-  // vector. Update this accordingly.
   DCHECK_EQ(vector->optimization_tier(), OptimizationTier::kNone);
   DCHECK_EQ(vector->invocation_count(), 0);
   DCHECK_EQ(vector->profiler_ticks(), 0);
@@ -676,6 +675,13 @@ bool FeedbackNexus::ConfigureMegamorphic() {
   return false;
 }
 
+void FeedbackNexus::ConfigureMegaDOM(const MaybeObjectHandle& handler) {
+  DisallowGarbageCollection no_gc;
+  MaybeObject sentinel = MegaDOMSentinel();
+
+  SetFeedback(sentinel, SKIP_WRITE_BARRIER, *handler, UPDATE_WRITE_BARRIER);
+}
+
 bool FeedbackNexus::ConfigureMegamorphic(IcCheckType property_type) {
   DisallowGarbageCollection no_gc;
   MaybeObject sentinel = MegamorphicSentinel();
@@ -736,6 +742,10 @@ InlineCacheState FeedbackNexus::ic_state() const {
       }
       if (feedback == MegamorphicSentinel()) {
         return MEGAMORPHIC;
+      }
+      if (feedback == MegaDOMSentinel()) {
+        DCHECK(IsLoadICKind(kind()));
+        return MEGADOM;
       }
       if (feedback->IsWeakOrCleared()) {
         // Don't check if the map is cleared.

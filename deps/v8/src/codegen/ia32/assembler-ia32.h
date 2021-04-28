@@ -235,6 +235,12 @@ class V8_EXPORT_PRIVATE Operand {
   explicit Operand(Register base, int32_t disp,
                    RelocInfo::Mode rmode = RelocInfo::NONE);
 
+  // [rip + disp/r]
+  explicit Operand(Label* label) {
+    set_modrm(0, ebp);
+    set_dispr(reinterpret_cast<intptr_t>(label), RelocInfo::INTERNAL_REFERENCE);
+  }
+
   // [base + index*scale + disp/r]
   explicit Operand(Register base, Register index, ScaleFactor scale,
                    int32_t disp, RelocInfo::Mode rmode = RelocInfo::NONE);
@@ -1510,6 +1516,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void vmovshdup(XMMRegister dst, XMMRegister src) {
     vinstr(0x16, dst, xmm0, src, kF3, k0F, kWIG);
   }
+  void vbroadcastss(XMMRegister dst, XMMRegister src) {
+    vinstr(0x18, dst, xmm0, src, k66, k0F38, kW0, AVX2);
+  }
   void vbroadcastss(XMMRegister dst, Operand src) {
     vinstr(0x18, dst, xmm0, src, k66, k0F38, kW0);
   }
@@ -1886,9 +1895,9 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
   void sse4_instr(XMMRegister dst, Operand src, byte prefix, byte escape1,
                   byte escape2, byte opcode);
   void vinstr(byte op, XMMRegister dst, XMMRegister src1, XMMRegister src2,
-              SIMDPrefix pp, LeadingOpcode m, VexW w);
+              SIMDPrefix pp, LeadingOpcode m, VexW w, CpuFeature = AVX);
   void vinstr(byte op, XMMRegister dst, XMMRegister src1, Operand src2,
-              SIMDPrefix pp, LeadingOpcode m, VexW w);
+              SIMDPrefix pp, LeadingOpcode m, VexW w, CpuFeature = AVX);
   // Most BMI instructions are similar.
   void bmi1(byte op, Register reg, Register vreg, Operand rm);
   void bmi2(SIMDPrefix pp, byte op, Register reg, Register vreg, Operand rm);
@@ -1927,10 +1936,10 @@ class V8_EXPORT_PRIVATE Assembler : public AssemblerBase {
 // checks that we did not generate too much.
 class EnsureSpace {
  public:
-  explicit EnsureSpace(Assembler* assembler) : assembler_(assembler) {
-    if (assembler_->buffer_overflow()) assembler_->GrowBuffer();
+  explicit V8_INLINE EnsureSpace(Assembler* assembler) : assembler_(assembler) {
+    if (V8_UNLIKELY(assembler_->buffer_overflow())) assembler_->GrowBuffer();
 #ifdef DEBUG
-    space_before_ = assembler_->available_space();
+    space_before_ = assembler->available_space();
 #endif
   }
 
@@ -1942,7 +1951,7 @@ class EnsureSpace {
 #endif
 
  private:
-  Assembler* assembler_;
+  Assembler* const assembler_;
 #ifdef DEBUG
   int space_before_;
 #endif

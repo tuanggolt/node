@@ -133,14 +133,17 @@ namespace internal {
       InterpreterPushArgsThenConstruct)                                        \
   ASM(InterpreterPushArgsThenConstructWithFinalSpread,                         \
       InterpreterPushArgsThenConstruct)                                        \
-  ASM(InterpreterEnterBytecodeAdvance, Dummy)                                  \
-  ASM(InterpreterEnterBytecodeDispatch, Dummy)                                 \
+  ASM(InterpreterEnterAtBytecode, Dummy)                                       \
+  ASM(InterpreterEnterAtNextBytecode, Dummy)                                   \
   ASM(InterpreterOnStackReplacement, ContextOnly)                              \
                                                                                \
   /* Baseline Compiler */                                                      \
   ASM(BaselineOutOfLinePrologue, BaselineOutOfLinePrologue)                    \
-  ASM(BaselineOnStackReplacement, ContextOnly)                                 \
+  ASM(BaselineOnStackReplacement, Void)                                        \
   ASM(BaselineLeaveFrame, BaselineLeaveFrame)                                  \
+  ASM(BaselineEnterAtBytecode, Void)                                           \
+  ASM(BaselineEnterAtNextBytecode, Void)                                       \
+  ASM(InterpreterOnStackReplacement_ToBaseline, Void)                          \
                                                                                \
   /* Code life-cycle */                                                        \
   TFC(CompileLazy, JSTrampoline)                                               \
@@ -530,6 +533,8 @@ namespace internal {
   /* ES6 #sec-generator.prototype.throw */                                     \
   TFJ(GeneratorPrototypeThrow, kDontAdaptArgumentsSentinel)                    \
   CPP(AsyncFunctionConstructor)                                                \
+  TFC(SuspendGeneratorBaseline, SuspendGeneratorBaseline)                      \
+  TFC(ResumeGeneratorBaseline, ResumeGeneratorBaseline)                        \
                                                                                \
   /* Iterator Protocol */                                                      \
   TFC(GetIteratorWithFeedbackLazyDeoptContinuation, GetIteratorStackParameter) \
@@ -600,7 +605,7 @@ namespace internal {
   TFS(IterableToListWithSymbolLookup, kIterable)                               \
   TFS(IterableToFixedArrayWithSymbolLookupSlow, kIterable)                     \
   TFS(IterableToListMayPreserveHoles, kIterable, kIteratorFn)                  \
-  TFS(IterableToFixedArrayForWasm, kIterable, kExpectedLength)                 \
+  IF_WASM(TFS, IterableToFixedArrayForWasm, kIterable, kExpectedLength)        \
                                                                                \
   /* #sec-createstringlistfromiterable */                                      \
   TFS(StringListFromIterable, kIterable)                                       \
@@ -855,14 +860,15 @@ namespace internal {
   TFJ(TypedArrayPrototypeMap, kDontAdaptArgumentsSentinel)                     \
                                                                                \
   /* Wasm */                                                                   \
-  ASM(GenericJSToWasmWrapper, Dummy)                                           \
-  ASM(WasmCompileLazy, Dummy)                                                  \
-  ASM(WasmDebugBreak, Dummy)                                                   \
-  TFC(WasmFloat32ToNumber, WasmFloat32ToNumber)                                \
-  TFC(WasmFloat64ToNumber, WasmFloat64ToNumber)                                \
-  TFC(WasmI32AtomicWait32, WasmI32AtomicWait32)                                \
-  TFC(WasmI64AtomicWait32, WasmI64AtomicWait32)                                \
-  TFC(JSToWasmLazyDeoptContinuation, SingleParameterOnStack)                   \
+  IF_WASM(ASM, GenericJSToWasmWrapper, Dummy)                                  \
+  IF_WASM(ASM, WasmCompileLazy, Dummy)                                         \
+  IF_WASM(ASM, WasmDebugBreak, Dummy)                                          \
+  IF_WASM(ASM, WasmOnStackReplace, Dummy)                                      \
+  IF_WASM(TFC, WasmFloat32ToNumber, WasmFloat32ToNumber)                       \
+  IF_WASM(TFC, WasmFloat64ToNumber, WasmFloat64ToNumber)                       \
+  IF_WASM(TFC, WasmI32AtomicWait32, WasmI32AtomicWait32)                       \
+  IF_WASM(TFC, WasmI64AtomicWait32, WasmI64AtomicWait32)                       \
+  IF_WASM(TFC, JSToWasmLazyDeoptContinuation, SingleParameterOnStack)          \
                                                                                \
   /* WeakMap */                                                                \
   TFJ(WeakMapConstructor, kDontAdaptArgumentsSentinel)                         \

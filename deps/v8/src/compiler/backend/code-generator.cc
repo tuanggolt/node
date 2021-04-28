@@ -13,7 +13,6 @@
 #include "src/compiler/globals.h"
 #include "src/compiler/linkage.h"
 #include "src/compiler/pipeline.h"
-#include "src/compiler/wasm-compiler.h"
 #include "src/diagnostics/eh-frame.h"
 #include "src/execution/frames.h"
 #include "src/logging/counters.h"
@@ -583,11 +582,6 @@ MaybeHandle<Code> CodeGenerator::FinalizeCode() {
     return MaybeHandle<Code>();
   }
 
-  // TODO(jgruber,v8:8888): Turn this into a DCHECK once confidence is
-  // high that the implementation is complete.
-  CHECK_IMPLIES(info()->IsNativeContextIndependent(),
-                code->IsNativeContextIndependent(isolate()));
-
   // Counts both compiled code and metadata.
   isolate()->counters()->total_compiled_code_size()->Increment(
       code->raw_body_size());
@@ -874,8 +868,16 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleInstruction(
       AssembleArchBoolean(instr, condition);
       break;
     }
+    case kFlags_select: {
+      AssembleArchSelect(instr, condition);
+      break;
+    }
     case kFlags_trap: {
+#if V8_ENABLE_WEBASSEMBLY
       AssembleArchTrap(instr, condition);
+#else
+      UNREACHABLE();
+#endif  // V8_ENABLE_WEBASSEMBLY
       break;
     }
     case kFlags_none: {
@@ -906,7 +908,13 @@ void CodeGenerator::AssembleSourcePosition(SourcePosition source_position) {
                                              source_position, false);
   if (FLAG_code_comments) {
     OptimizedCompilationInfo* info = this->info();
-    if (!info->IsOptimizing() && !info->IsWasm()) return;
+    if (!info->IsOptimizing()) {
+#if V8_ENABLE_WEBASSEMBLY
+      if (!info->IsWasm()) return;
+#else
+      return;
+#endif  // V8_ENABLE_WEBASSEMBLY
+    }
     std::ostringstream buffer;
     buffer << "-- ";
     // Turbolizer only needs the source position, as it can reconstruct
@@ -937,12 +945,15 @@ bool CodeGenerator::GetSlotAboveSPBeforeTailCall(Instruction* instr,
 }
 
 StubCallMode CodeGenerator::DetermineStubCallMode() const {
+#if V8_ENABLE_WEBASSEMBLY
   CodeKind code_kind = info()->code_kind();
-  return (code_kind == CodeKind::WASM_FUNCTION ||
-          code_kind == CodeKind::WASM_TO_CAPI_FUNCTION ||
-          code_kind == CodeKind::WASM_TO_JS_FUNCTION)
-             ? StubCallMode::kCallWasmRuntimeStub
-             : StubCallMode::kCallCodeObject;
+  if (code_kind == CodeKind::WASM_FUNCTION ||
+      code_kind == CodeKind::WASM_TO_CAPI_FUNCTION ||
+      code_kind == CodeKind::WASM_TO_JS_FUNCTION) {
+    return StubCallMode::kCallWasmRuntimeStub;
+  }
+#endif  // V8_ENABLE_WEBASSEMBLY
+  return StubCallMode::kCallCodeObject;
 }
 
 void CodeGenerator::AssembleGaps(Instruction* instr) {
@@ -1176,14 +1187,16 @@ void CodeGenerator::BuildTranslationForFrameStateDescriptor(
                                                   height);
       break;
     }
+#if V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kJSToWasmBuiltinContinuation: {
       const JSToWasmFrameStateDescriptor* js_to_wasm_descriptor =
           static_cast<const JSToWasmFrameStateDescriptor*>(descriptor);
       translations_.BeginJSToWasmBuiltinContinuationFrame(
           bailout_id, shared_info_id, height,
-          js_to_wasm_descriptor->return_type());
+          js_to_wasm_descriptor->return_kind());
       break;
     }
+#endif  // V8_ENABLE_WEBASSEMBLY
     case FrameStateType::kJavaScriptBuiltinContinuation: {
       translations_.BeginJavaScriptBuiltinContinuationFrame(
           bailout_id, shared_info_id, height);

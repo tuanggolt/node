@@ -474,7 +474,6 @@ namespace internal {
   T(BadSetterRestParameter,                                                    \
     "Setter function argument must not be a rest parameter")                   \
   T(ParamDupe, "Duplicate parameter name not allowed in this context")         \
-  T(ParenthesisInArgString, "Function arg string contains parenthesis")        \
   T(ArgStringTerminatesParametersEarly,                                        \
     "Arg string terminates parameters early")                                  \
   T(UnexpectedEndOfArgString, "Unexpected end of arg string")                  \
@@ -565,7 +564,7 @@ namespace internal {
   T(WasmTrapRemByZero, "remainder by zero")                                    \
   T(WasmTrapFloatUnrepresentable, "float unrepresentable in integer range")    \
   T(WasmTrapTableOutOfBounds, "table index is out of bounds")                  \
-  T(WasmTrapFuncSigMismatch, "function signature mismatch")                    \
+  T(WasmTrapFuncSigMismatch, "null function or function signature mismatch")   \
   T(WasmTrapMultiReturnLengthMismatch, "multi-return length mismatch")         \
   T(WasmTrapJSTypeError, "type incompatibility when transforming from/to JS")  \
   T(WasmTrapDataSegmentDropped, "data segment has been dropped")               \

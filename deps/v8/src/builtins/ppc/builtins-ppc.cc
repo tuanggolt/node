@@ -6,6 +6,7 @@
 
 #include "src/api/api-arguments.h"
 #include "src/codegen/code-factory.h"
+#include "src/codegen/interface-descriptors-inl.h"
 // For interpreter_entry_return_pc_offset. TODO(jkummerow): Drop.
 #include "src/codegen/macro-assembler-inl.h"
 #include "src/codegen/register-configuration.h"
@@ -21,8 +22,11 @@
 #include "src/objects/js-generator.h"
 #include "src/objects/smi.h"
 #include "src/runtime/runtime.h"
+
+#if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-linkage.h"
 #include "src/wasm/wasm-objects.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 namespace v8 {
 namespace internal {
@@ -1475,7 +1479,7 @@ static void Generate_InterpreterEnterBytecode(MacroAssembler* masm) {
   __ Jump(kJavaScriptCallCodeStartRegister);
 }
 
-void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
+void Builtins::Generate_InterpreterEnterAtNextBytecode(MacroAssembler* masm) {
   // Get bytecode array and bytecode offset from the stack frame.
   __ LoadP(kInterpreterBytecodeArrayRegister,
            MemOperand(fp, InterpreterFrameConstants::kBytecodeArrayFromFp));
@@ -1521,7 +1525,7 @@ void Builtins::Generate_InterpreterEnterBytecodeAdvance(MacroAssembler* masm) {
   __ Abort(AbortReason::kInvalidBytecodeAdvance);
 }
 
-void Builtins::Generate_InterpreterEnterBytecodeDispatch(MacroAssembler* masm) {
+void Builtins::Generate_InterpreterEnterAtBytecode(MacroAssembler* masm) {
   Generate_InterpreterEnterBytecode(masm);
 }
 
@@ -1844,6 +1848,7 @@ void Builtins::Generate_ReflectConstruct(MacroAssembler* masm) {
 }
 
 // static
+// TODO(v8:11615): Observe Code::kMaxArguments in CallOrConstructVarargs
 void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
                                                Handle<Code> code) {
   // ----------- S t a t e -------------
@@ -1856,7 +1861,7 @@ void Builtins::Generate_CallOrConstructVarargs(MacroAssembler* masm,
 
   Register scratch = ip;
 
-  if (masm->emit_debug_code()) {
+  if (FLAG_debug_code) {
     // Allow r5 to be a FixedArray, or a FixedDoubleArray if r7 == 0.
     Label ok, fail;
     __ AssertNotSmi(r5);
@@ -2263,7 +2268,7 @@ void Builtins::Generate_Call(MacroAssembler* masm, ConvertReceiverMode mode) {
   // Overwrite the original receiver the (original) target.
   __ StoreReceiver(r4, r3, r8);
   // Let the "call_as_function_delegate" take care of the rest.
-  __ LoadNativeContextSlot(Context::CALL_AS_FUNCTION_DELEGATE_INDEX, r4);
+  __ LoadNativeContextSlot(r4, Context::CALL_AS_FUNCTION_DELEGATE_INDEX);
   __ Jump(masm->isolate()->builtins()->CallFunction(
               ConvertReceiverMode::kNotNullOrUndefined),
           RelocInfo::CODE_TARGET);
@@ -2379,7 +2384,7 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
     // Overwrite the original receiver with the (original) target.
     __ StoreReceiver(r4, r3, r8);
     // Let the "call_as_constructor_delegate" take care of the rest.
-    __ LoadNativeContextSlot(Context::CALL_AS_CONSTRUCTOR_DELEGATE_INDEX, r4);
+    __ LoadNativeContextSlot(r4, Context::CALL_AS_CONSTRUCTOR_DELEGATE_INDEX);
     __ Jump(masm->isolate()->builtins()->CallFunction(),
             RelocInfo::CODE_TARGET);
   }
@@ -2391,6 +2396,7 @@ void Builtins::Generate_Construct(MacroAssembler* masm) {
           RelocInfo::CODE_TARGET);
 }
 
+#if V8_ENABLE_WEBASSEMBLY
 void Builtins::Generate_WasmCompileLazy(MacroAssembler* masm) {
   // The function index was put in a register by the jump table trampoline.
   // Convert to Smi for the runtime call.
@@ -2502,6 +2508,17 @@ void Builtins::Generate_WasmDebugBreak(MacroAssembler* masm) {
   }
   __ Ret();
 }
+
+void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
+  // TODO(v8:10701): Implement for this platform.
+  __ Trap();
+}
+
+void Builtins::Generate_WasmOnStackReplace(MacroAssembler* masm) {
+  // Only needed on x64.
+  __ Trap();
+}
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 void Builtins::Generate_CEntry(MacroAssembler* masm, int result_size,
                                SaveFPRegsMode save_doubles, ArgvMode argv_mode,
@@ -2800,11 +2817,6 @@ void Builtins::Generate_DoubleToI(MacroAssembler* masm) {
   __ Ret();
 }
 
-void Builtins::Generate_GenericJSToWasmWrapper(MacroAssembler* masm) {
-  // TODO(v8:10701): Implement for this platform.
-  __ Trap();
-}
-
 namespace {
 
 static int AddressOffset(ExternalReference ref0, ExternalReference ref1) {
@@ -2887,7 +2899,7 @@ static void CallApiFunctionAndReturn(MacroAssembler* masm,
   // No more valid handles (the result handle was the last one). Restore
   // previous handle scope.
   __ StoreP(r14, MemOperand(r17, kNextOffset));
-  if (__ emit_debug_code()) {
+  if (FLAG_debug_code) {
     __ lwz(r4, MemOperand(r17, kLevelOffset));
     __ cmp(r4, r16);
     __ Check(eq, AbortReason::kUnexpectedLevelAfterReturnFromApiCall);
@@ -3425,6 +3437,22 @@ void Builtins::Generate_DeoptimizationEntry_Bailout(MacroAssembler* masm) {
 
 void Builtins::Generate_DeoptimizationEntry_Lazy(MacroAssembler* masm) {
   Generate_DeoptimizationEntry(masm, DeoptimizeKind::kLazy);
+}
+
+void Builtins::Generate_BaselineEnterAtBytecode(MacroAssembler* masm) {
+  // Implement on this platform, https://crrev.com/c/2695591.
+  __ bkpt(0);
+}
+
+void Builtins::Generate_BaselineEnterAtNextBytecode(MacroAssembler* masm) {
+  // Implement on this platform, https://crrev.com/c/2695591.
+  __ bkpt(0);
+}
+
+void Builtins::Generate_InterpreterOnStackReplacement_ToBaseline(
+    MacroAssembler* masm) {
+  // Implement on this platform, https://crrev.com/c/2800112.
+  __ bkpt(0);
 }
 
 void Builtins::Generate_DynamicCheckMapsTrampoline(MacroAssembler* masm) {

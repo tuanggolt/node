@@ -777,9 +777,7 @@ Reduction JSCreateLowering::ReduceJSCreateAsyncFunctionObject(Node* node) {
   // Create the register file.
   MapRef fixed_array_map(broker(), factory()->fixed_array_map());
   AllocationBuilder ab(jsgraph(), effect, control);
-  if (!ab.CanAllocateArray(register_count, fixed_array_map)) {
-    return NoChange();
-  }
+  CHECK(ab.CanAllocateArray(register_count, fixed_array_map));
   ab.AllocateArray(register_count, fixed_array_map);
   for (int i = 0; i < register_count; ++i) {
     ab.Store(AccessBuilder::ForFixedArraySlot(i),
@@ -892,9 +890,7 @@ Reduction JSCreateLowering::ReduceJSCreateBoundFunction(Node* node) {
   if (arity > 0) {
     MapRef fixed_array_map(broker(), factory()->fixed_array_map());
     AllocationBuilder ab(jsgraph(), effect, control);
-    if (!ab.CanAllocateArray(arity, fixed_array_map)) {
-      return NoChange();
-    }
+    CHECK(ab.CanAllocateArray(arity, fixed_array_map));
     ab.AllocateArray(arity, fixed_array_map);
     for (int i = 0; i < arity; ++i) {
       ab.Store(AccessBuilder::ForFixedArraySlot(i),
@@ -1712,6 +1708,9 @@ Node* JSCreateLowering::AllocateFastLiteral(Node* effect, Node* control,
   int const boilerplate_length = boilerplate_map.GetInObjectProperties();
   for (int index = static_cast<int>(inobject_fields.size());
        index < boilerplate_length; ++index) {
+    DCHECK(!V8_MAP_PACKING_BOOL);
+    // TODO(wenyuzhao): Fix incorrect MachineType when V8_MAP_PACKING is
+    // enabled.
     FieldAccess access =
         AccessBuilder::ForJSObjectInObjectProperty(boilerplate_map, index);
     Node* value = jsgraph()->HeapConstant(factory()->one_pointer_filler_map());
@@ -1764,7 +1763,7 @@ Node* JSCreateLowering::AllocateFastLiteralElements(Node* effect, Node* control,
   if (elements_map.instance_type() == FIXED_DOUBLE_ARRAY_TYPE) {
     FixedDoubleArrayRef elements = boilerplate_elements.AsFixedDoubleArray();
     for (int i = 0; i < elements_length; ++i) {
-      Float64 value = elements.get(i);
+      Float64 value = elements.GetFromImmutableFixedDoubleArray(i);
       if (value.is_hole_nan()) {
         elements_values[i] = jsgraph()->TheHoleConstant();
       } else {

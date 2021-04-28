@@ -12,6 +12,7 @@
 #include "src/codegen/callable.h"
 #include "src/codegen/code-factory.h"
 #include "src/codegen/external-reference-table.h"
+#include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/macro-assembler.h"
 #include "src/codegen/register-configuration.h"
 #include "src/debug/debug.h"
@@ -23,7 +24,10 @@
 #include "src/runtime/runtime.h"
 #include "src/snapshot/embedded/embedded-data.h"
 #include "src/snapshot/snapshot.h"
+
+#if V8_ENABLE_WEBASSEMBLY
 #include "src/wasm/wasm-code-manager.h"
+#endif  // V8_ENABLE_WEBASSEMBLY
 
 // Satisfy cpplint check, but don't include platform-specific header. It is
 // included recursively via macro-assembler.h.
@@ -185,7 +189,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
   DCHECK(IsAligned(offset, kPointerSize));
 
   Addu(dst, object, Operand(offset - kHeapObjectTag));
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     BlockTrampolinePoolScope block_trampoline_pool(this);
     Label ok;
     And(t8, dst, Operand(kPointerSize - 1));
@@ -201,7 +205,7 @@ void MacroAssembler::RecordWriteField(Register object, int offset,
 
   // Clobber clobbered input registers when running with the debug-code flag
   // turned on to provoke errors.
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     li(value, Operand(bit_cast<int32_t>(kZapValue + 4)));
     li(dst, Operand(bit_cast<int32_t>(kZapValue + 8)));
   }
@@ -333,7 +337,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
   DCHECK(!AreAliased(object, address, value, t8));
   DCHECK(!AreAliased(object, address, value, t9));
 
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
     lw(scratch, MemOperand(address));
@@ -376,7 +380,7 @@ void MacroAssembler::RecordWrite(Register object, Register address,
 
   // Clobber clobbered registers when running with the debug-code flag
   // turned on to provoke errors.
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     li(address, Operand(bit_cast<int32_t>(kZapValue + 12)));
     li(value, Operand(bit_cast<int32_t>(kZapValue + 16)));
   }
@@ -2741,8 +2745,13 @@ void TurboAssembler::TruncateDoubleToI(Isolate* isolate, Zone* zone,
   Subu(sp, sp, Operand(kDoubleSize));  // Put input on stack.
   Sdc1(double_input, MemOperand(sp, 0));
 
+#if V8_ENABLE_WEBASSEMBLY
   if (stub_mode == StubCallMode::kCallWasmRuntimeStub) {
     Call(wasm::WasmCode::kDoubleToI, RelocInfo::WASM_STUB_CALL);
+#else
+  // For balance.
+  if (false) {
+#endif  // V8_ENABLE_WEBASSEMBLY
   } else {
     Call(BUILTIN_CODE(isolate, DoubleToI), RelocInfo::CODE_TARGET);
   }
@@ -4738,7 +4747,7 @@ void TurboAssembler::DebugBreak() { stop(); }
 
 void TurboAssembler::Assert(Condition cc, AbortReason reason, Register rs,
                             Operand rt) {
-  if (emit_debug_code()) Check(cc, reason, rs, rt);
+  if (FLAG_debug_code) Check(cc, reason, rs, rt);
 }
 
 void TurboAssembler::Check(Condition cc, AbortReason reason, Register rs,
@@ -4753,11 +4762,11 @@ void TurboAssembler::Check(Condition cc, AbortReason reason, Register rs,
 void TurboAssembler::Abort(AbortReason reason) {
   Label abort_start;
   bind(&abort_start);
-#ifdef DEBUG
-  const char* msg = GetAbortReason(reason);
-  RecordComment("Abort message: ");
-  RecordComment(msg);
-#endif
+  if (FLAG_code_comments) {
+    const char* msg = GetAbortReason(reason);
+    RecordComment("Abort message: ");
+    RecordComment(msg);
+  }
 
   // Avoid emitting call to builtin if requested.
   if (trap_on_abort()) {
@@ -4805,7 +4814,7 @@ void TurboAssembler::LoadMap(Register destination, Register object) {
   Lw(destination, FieldMemOperand(object, HeapObject::kMapOffset));
 }
 
-void MacroAssembler::LoadNativeContextSlot(int index, Register dst) {
+void MacroAssembler::LoadNativeContextSlot(Register dst, int index) {
   LoadMap(dst, cp);
   Lw(dst,
      FieldMemOperand(dst, Map::kConstructorOrBackPointerOrNativeContextOffset));
@@ -4877,7 +4886,7 @@ void MacroAssembler::EnterExitFrame(bool save_doubles, int stack_space,
   // Set up new frame pointer.
   addiu(fp, sp, ExitFrameConstants::kFixedFrameSizeFromFp);
 
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     sw(zero_reg, MemOperand(fp, ExitFrameConstants::kSPOffset));
   }
 
@@ -4991,7 +5000,7 @@ int TurboAssembler::ActivationFrameAlignment() {
 }
 
 void MacroAssembler::AssertStackIsAligned() {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     const int frame_alignment = ActivationFrameAlignment();
     const int frame_alignment_mask = frame_alignment - 1;
 
@@ -5024,7 +5033,7 @@ void MacroAssembler::JumpIfNotSmi(Register value, Label* not_smi_label,
 }
 
 void MacroAssembler::AssertNotSmi(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
@@ -5034,7 +5043,7 @@ void MacroAssembler::AssertNotSmi(Register object) {
 }
 
 void MacroAssembler::AssertSmi(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     STATIC_ASSERT(kSmiTag == 0);
     UseScratchRegisterScope temps(this);
     Register scratch = temps.Acquire();
@@ -5044,7 +5053,7 @@ void MacroAssembler::AssertSmi(Register object) {
 }
 
 void MacroAssembler::AssertConstructor(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     BlockTrampolinePoolScope block_trampoline_pool(this);
     STATIC_ASSERT(kSmiTag == 0);
     SmiTst(object, t8);
@@ -5059,7 +5068,7 @@ void MacroAssembler::AssertConstructor(Register object) {
 }
 
 void MacroAssembler::AssertFunction(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     BlockTrampolinePoolScope block_trampoline_pool(this);
     STATIC_ASSERT(kSmiTag == 0);
     SmiTst(object, t8);
@@ -5075,7 +5084,7 @@ void MacroAssembler::AssertFunction(Register object) {
 }
 
 void MacroAssembler::AssertBoundFunction(Register object) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     BlockTrampolinePoolScope block_trampoline_pool(this);
     STATIC_ASSERT(kSmiTag == 0);
     SmiTst(object, t8);
@@ -5088,7 +5097,7 @@ void MacroAssembler::AssertBoundFunction(Register object) {
 }
 
 void MacroAssembler::AssertGeneratorObject(Register object) {
-  if (!emit_debug_code()) return;
+  if (!FLAG_debug_code) return;
   BlockTrampolinePoolScope block_trampoline_pool(this);
   STATIC_ASSERT(kSmiTag == 0);
   SmiTst(object, t8);
@@ -5115,7 +5124,7 @@ void MacroAssembler::AssertGeneratorObject(Register object) {
 
 void MacroAssembler::AssertUndefinedOrAllocationSite(Register object,
                                                      Register scratch) {
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     Label done_checking;
     AssertNotSmi(object);
     LoadRoot(scratch, RootIndex::kUndefinedValue);
@@ -5408,7 +5417,7 @@ void TurboAssembler::CallCFunctionHelper(Register function_base,
   // PrepareCallCFunction. The C function must be called via t9, for mips ABI.
 
 #if V8_HOST_ARCH_MIPS
-  if (emit_debug_code()) {
+  if (FLAG_debug_code) {
     int frame_alignment = base::OS::ActivationFrameAlignment();
     int frame_alignment_mask = frame_alignment - 1;
     if (frame_alignment > kPointerSize) {

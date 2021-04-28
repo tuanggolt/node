@@ -119,6 +119,12 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   // Returns the pc offset at which the frame ends.
   int LeaveFrame(StackFrame::Type type, int stack_adjustment = 0);
 
+  void AllocateStackSpace(int bytes) {
+    DCHECK_GE(bytes, 0);
+    if (bytes == 0) return;
+    Add(sp, sp, -bytes, r0);
+  }
+
   // Push a fixed frame, consisting of lr, fp, constant pool.
   void PushCommonFrame(Register marker_reg = no_reg);
 
@@ -155,8 +161,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
   void LoadFloat32(DoubleRegister dst, const MemOperand& mem,
                    Register scratch = no_reg);
   void LoadDoubleLiteral(DoubleRegister result, Double value, Register scratch);
-  void LoadSimd128(Simd128Register dst, const MemOperand& mem,
-                   Register ScratchReg, Simd128Register ScratchDoubleReg);
+  void LoadSimd128(Simd128Register dst, const MemOperand& mem);
 
   // load a literal signed int value <value> to GPR <dst>
   void LoadIntLiteral(Register dst, int value);
@@ -179,8 +184,7 @@ class V8_EXPORT_PRIVATE TurboAssembler : public TurboAssemblerBase {
                    Register scratch = no_reg);
   void StoreSingleU(DoubleRegister src, const MemOperand& mem,
                     Register scratch = no_reg);
-  void StoreSimd128(Simd128Register src, const MemOperand& mem,
-                    Register ScratchReg, Simd128Register ScratchDoubleReg);
+  void StoreSimd128(Simd128Register src, const MemOperand& mem);
 
   void Cmpi(Register src1, const Operand& src2, Register scratch,
             CRegister cr = cr7);
@@ -781,10 +785,10 @@ class V8_EXPORT_PRIVATE MacroAssembler : public TurboAssembler {
 
   // Load the global proxy from the current context.
   void LoadGlobalProxy(Register dst) {
-    LoadNativeContextSlot(Context::GLOBAL_PROXY_INDEX, dst);
+    LoadNativeContextSlot(dst, Context::GLOBAL_PROXY_INDEX);
   }
 
-  void LoadNativeContextSlot(int index, Register dst);
+  void LoadNativeContextSlot(Register dst, int index);
 
   // ----------------------------------------------------------------
   // new PPC macro-assembler interfaces that are slightly higher level

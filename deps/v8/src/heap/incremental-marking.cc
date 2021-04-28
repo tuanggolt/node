@@ -39,9 +39,8 @@ void IncrementalMarking::Observer::Step(int bytes_allocated, Address addr,
                                         size_t size) {
   Heap* heap = incremental_marking_->heap();
   VMState<GC> state(heap->isolate());
-  RuntimeCallTimerScope runtime_timer(
-      heap->isolate(),
-      RuntimeCallCounterId::kGC_Custom_IncrementalMarkingObserver);
+  RCS_SCOPE(heap->isolate(),
+            RuntimeCallCounterId::kGC_Custom_IncrementalMarkingObserver);
   incremental_marking_->AdvanceOnAllocation();
   // AdvanceIncrementalMarkingOnAllocation can start incremental marking.
   incremental_marking_->EnsureBlackAllocated(addr, size);
@@ -108,18 +107,23 @@ class IncrementalMarkingRootMarkingVisitor : public RootVisitor {
 
   void VisitRootPointer(Root root, const char* description,
                         FullObjectSlot p) override {
+    DCHECK(!MapWord::IsPacked((*p).ptr()));
     MarkObjectByPointer(p);
   }
 
   void VisitRootPointers(Root root, const char* description,
                          FullObjectSlot start, FullObjectSlot end) override {
-    for (FullObjectSlot p = start; p < end; ++p) MarkObjectByPointer(p);
+    for (FullObjectSlot p = start; p < end; ++p) {
+      DCHECK(!MapWord::IsPacked((*p).ptr()));
+      MarkObjectByPointer(p);
+    }
   }
 
  private:
   void MarkObjectByPointer(FullObjectSlot p) {
     Object obj = *p;
     if (!obj.IsHeapObject()) return;
+    DCHECK(!MapWord::IsPacked(obj.ptr()));
 
     heap_->incremental_marking()->WhiteToGreyAndPush(HeapObject::cast(obj));
   }
@@ -314,7 +318,9 @@ void IncrementalMarking::MarkRoots() {
 
   IncrementalMarkingRootMarkingVisitor visitor(this);
   heap_->IterateRoots(
-      &visitor, base::EnumSet<SkipRoot>{SkipRoot::kStack, SkipRoot::kWeak});
+      &visitor,
+      base::EnumSet<SkipRoot>{SkipRoot::kStack, SkipRoot::kMainThreadHandles,
+                              SkipRoot::kWeak});
 }
 
 bool IncrementalMarking::ShouldRetainMap(Map map, int age) {
@@ -356,6 +362,9 @@ void IncrementalMarking::RetainMaps() {
       if (!map_retaining_is_disabled && marking_state()->IsWhite(map)) {
         if (ShouldRetainMap(map, age)) {
           WhiteToGreyAndPush(map);
+          if (V8_UNLIKELY(FLAG_track_retaining_path)) {
+            heap_->AddRetainingRoot(Root::kRetainMaps, map);
+          }
         }
         Object prototype = map.prototype();
         if (age > 0 && prototype.IsHeapObject() &&

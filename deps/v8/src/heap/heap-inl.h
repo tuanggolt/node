@@ -8,22 +8,17 @@
 #include <cmath>
 
 // Clients of this interface shouldn't depend on lots of heap internals.
-// Do not include anything from src/heap other than src/heap/heap.h and its
-// write barrier here!
+// Avoid including anything but `heap.h` from `src/heap` where possible.
 #include "src/base/atomic-utils.h"
 #include "src/base/atomicops.h"
 #include "src/base/platform/platform.h"
+#include "src/base/sanitizer/msan.h"
 #include "src/common/assert-scope.h"
-#include "src/heap/heap-write-barrier.h"
-#include "src/heap/heap.h"
-#include "src/heap/third-party/heap-api.h"
-#include "src/objects/feedback-vector.h"
-
-// TODO(gc): There is one more include to remove in order to no longer
-// leak heap internals to users of this interface!
 #include "src/execution/isolate-data.h"
 #include "src/execution/isolate.h"
 #include "src/heap/code-object-registry.h"
+#include "src/heap/heap-write-barrier.h"
+#include "src/heap/heap.h"
 #include "src/heap/large-spaces.h"
 #include "src/heap/memory-allocator.h"
 #include "src/heap/memory-chunk.h"
@@ -31,11 +26,13 @@
 #include "src/heap/paged-spaces-inl.h"
 #include "src/heap/read-only-spaces.h"
 #include "src/heap/spaces-inl.h"
+#include "src/heap/third-party/heap-api.h"
 #include "src/objects/allocation-site-inl.h"
 #include "src/objects/api-callbacks-inl.h"
 #include "src/objects/cell-inl.h"
 #include "src/objects/descriptor-array.h"
 #include "src/objects/feedback-cell-inl.h"
+#include "src/objects/feedback-vector.h"
 #include "src/objects/literal-objects-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/objects/oddball.h"
@@ -45,7 +42,6 @@
 #include "src/objects/slots-inl.h"
 #include "src/objects/struct-inl.h"
 #include "src/profiler/heap-profiler.h"
-#include "src/sanitizer/msan.h"
 #include "src/strings/string-hasher.h"
 #include "src/zone/zone-list-inl.h"
 
@@ -196,6 +192,10 @@ AllocationResult Heap::AllocateRaw(int size_in_bytes, AllocationType type,
 #ifdef DEBUG
   IncrementObjectCounters();
 #endif
+
+  if (CanSafepoint()) {
+    main_thread_local_heap()->Safepoint();
+  }
 
   size_t large_object_threshold = MaxRegularHeapObjectSize(type);
   bool large_object =
@@ -502,7 +502,7 @@ AllocationMemento Heap::FindAllocationMemento(Map map, HeapObject object) {
   // below (memento_address == top) ensures that this is safe. Mark the word as
   // initialized to silence MemorySanitizer warnings.
   MSAN_MEMORY_IS_INITIALIZED(candidate_map_slot.address(), kTaggedSize);
-  if (!candidate_map_slot.contains_value(
+  if (!candidate_map_slot.contains_map_value(
           ReadOnlyRoots(this).allocation_memento_map().ptr())) {
     return AllocationMemento();
   }
@@ -644,8 +644,8 @@ int Heap::NextDebuggingId() {
 }
 
 int Heap::GetNextTemplateSerialNumber() {
-  int next_serial_number = next_template_serial_number().value() + 1;
-  set_next_template_serial_number(Smi::FromInt(next_serial_number));
+  int next_serial_number = next_template_serial_number().value();
+  set_next_template_serial_number(Smi::FromInt(next_serial_number + 1));
   return next_serial_number;
 }
 

@@ -488,6 +488,11 @@ void CodeGenerator::AssemblePrepareTailCall() {
   frame_access_state()->SetFrameAccessToSP();
 }
 
+void CodeGenerator::AssembleArchSelect(Instruction* instr,
+                                       FlagsCondition condition) {
+  UNIMPLEMENTED();
+}
+
 namespace {
 
 void AdjustStackPointerForTailCall(TurboAssembler* tasm,
@@ -509,15 +514,15 @@ void AdjustStackPointerForTailCall(TurboAssembler* tasm,
 }  // namespace
 
 void CodeGenerator::AssembleTailCallBeforeGap(Instruction* instr,
-                                              int first_unused_stack_slot) {
+                                              int first_unused_slot_offset) {
   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
-                                first_unused_stack_slot, false);
+                                first_unused_slot_offset, false);
 }
 
 void CodeGenerator::AssembleTailCallAfterGap(Instruction* instr,
-                                             int first_unused_stack_slot) {
+                                             int first_unused_slot_offset) {
   AdjustStackPointerForTailCall(tasm(), frame_access_state(),
-                                first_unused_stack_slot);
+                                first_unused_slot_offset);
 }
 
 // Check that {kJavaScriptCallCodeStartRegister} is correct.
@@ -606,8 +611,8 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
         Address wasm_code = static_cast<Address>(constant.ToInt64());
         __ Call(wasm_code, constant.rmode());
       } else {
-        __ Add64(kScratchReg, i.InputRegister(0), 0);
-        __ Call(kScratchReg);
+        __ Add64(t6, i.InputRegister(0), 0);
+        __ Call(t6);
       }
       RecordCallPosition(instr);
       frame_access_state()->ClearSPDelta();
@@ -1121,6 +1126,9 @@ CodeGenerator::CodeGenResult CodeGenerator::AssembleArchInstruction(
       break;
     case kRiscvCmp:
       // Pseudo-instruction used for cmp/branch. No opcode emitted here.
+      break;
+    case kRiscvCmpZero:
+      // Pseudo-instruction used for cmpzero/branch. No opcode emitted here.
       break;
     case kRiscvMov:
       // TODO(plind): Should we combine mov/li like this, or use separate instr?
@@ -1902,6 +1910,9 @@ void AssembleBranchToLabels(CodeGenerator* gen, TurboAssembler* tasm,
   } else if (instr->arch_opcode() == kRiscvCmp) {
     cc = FlagsConditionToConditionCmp(condition);
     __ Branch(tlabel, cc, i.InputRegister(0), i.InputOperand(1));
+  } else if (instr->arch_opcode() == kRiscvCmpZero) {
+    cc = FlagsConditionToConditionCmp(condition);
+    __ Branch(tlabel, cc, i.InputRegister(0), Operand(zero_reg));
   } else if (instr->arch_opcode() == kArchStackPointerGreaterThan) {
     cc = FlagsConditionToConditionCmp(condition);
     Register lhs_register = sp;
@@ -1953,6 +1964,12 @@ void CodeGenerator::AssembleBranchPoisoning(FlagsCondition condition,
   switch (instr->arch_opcode()) {
     case kRiscvCmp: {
       __ CompareI(kScratchReg, i.InputRegister(0), i.InputOperand(1),
+                  FlagsConditionToConditionCmp(condition));
+      __ LoadZeroIfConditionNotZero(kSpeculationPoisonRegister, kScratchReg);
+    }
+      return;
+    case kRiscvCmpZero: {
+      __ CompareI(kScratchReg, i.InputRegister(0), Operand(zero_reg),
                   FlagsConditionToConditionCmp(condition));
       __ LoadZeroIfConditionNotZero(kSpeculationPoisonRegister, kScratchReg);
     }
@@ -2074,8 +2091,7 @@ void CodeGenerator::AssembleArchTrap(Instruction* instr,
             ExternalReference::wasm_call_trap_callback_for_testing(), 0);
         __ LeaveFrame(StackFrame::WASM);
         auto call_descriptor = gen_->linkage()->GetIncomingDescriptor();
-        int pop_count =
-            static_cast<int>(call_descriptor->StackParameterCount());
+        int pop_count = static_cast<int>(call_descriptor->ParameterSlotCount());
         pop_count += (pop_count & 1);  // align
         __ Drop(pop_count);
         __ Ret();
@@ -2225,6 +2241,58 @@ void CodeGenerator::AssembleArchBoolean(Instruction* instr,
         UNREACHABLE();
     }
     return;
+  } else if (instr->arch_opcode() == kRiscvCmpZero) {
+    cc = FlagsConditionToConditionCmp(condition);
+    switch (cc) {
+      case eq: {
+        Register left = i.InputRegister(0);
+        __ Sltu(result, left, 1);
+        break;
+      }
+      case ne: {
+        Register left = i.InputRegister(0);
+        __ Sltu(result, zero_reg, left);
+        break;
+      }
+      case lt:
+      case ge: {
+        Register left = i.InputRegister(0);
+        Operand right = Operand(zero_reg);
+        __ Slt(result, left, right);
+        if (cc == ge) {
+          __ Xor(result, result, 1);
+        }
+      } break;
+      case gt:
+      case le: {
+        Operand left = i.InputOperand(0);
+        __ Slt(result, zero_reg, left);
+        if (cc == le) {
+          __ Xor(result, result, 1);
+        }
+      } break;
+      case Uless:
+      case Ugreater_equal: {
+        Register left = i.InputRegister(0);
+        Operand right = Operand(zero_reg);
+        __ Sltu(result, left, right);
+        if (cc == Ugreater_equal) {
+          __ Xor(result, result, 1);
+        }
+      } break;
+      case Ugreater:
+      case Uless_equal: {
+        Register left = zero_reg;
+        Operand right = i.InputOperand(0);
+        __ Sltu(result, left, right);
+        if (cc == Uless_equal) {
+          __ Xor(result, result, 1);
+        }
+      } break;
+      default:
+        UNREACHABLE();
+    }
+    return;
   } else if (instr->arch_opcode() == kRiscvCmpD ||
              instr->arch_opcode() == kRiscvCmpS) {
     FPURegister left = i.InputOrZeroDoubleRegister(0);
@@ -2347,7 +2415,7 @@ void CodeGenerator::AssembleConstructFrame() {
     // frame is still on the stack. Optimized code uses OSR values directly from
     // the unoptimized frame. Thus, all that needs to be done is to allocate the
     // remaining stack slots.
-    if (FLAG_code_comments) __ RecordComment("-- OSR entrypoint --");
+    __ RecordComment("-- OSR entrypoint --");
     osr_pc_offset_ = __ pc_offset();
     required_slots -= osr_helper()->UnoptimizedFrameSlots();
     ResetSpeculationPoison();
@@ -2441,15 +2509,15 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
 
   RiscvOperandConverter g(this, nullptr);
 
-  const int parameter_count =
-      static_cast<int>(call_descriptor->StackParameterCount());
+  const int parameter_slots =
+      static_cast<int>(call_descriptor->ParameterSlotCount());
 
-  // {aditional_pop_count} is only greater than zero if {parameter_count = 0}.
+  // {aditional_pop_count} is only greater than zero if {parameter_slots = 0}.
   // Check RawMachineAssembler::PopAndReturn.
-  if (parameter_count != 0) {
+  if (parameter_slots != 0) {
     if (additional_pop_count->IsImmediate()) {
       DCHECK_EQ(g.ToConstant(additional_pop_count).ToInt32(), 0);
-    } else if (__ emit_debug_code()) {
+    } else if (FLAG_debug_code) {
       __ Assert(eq, AbortReason::kUnexpectedAdditionalPopValue,
                 g.ToRegister(additional_pop_count),
                 Operand(static_cast<int64_t>(0)));
@@ -2457,12 +2525,12 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   }
 
   // Functions with JS linkage have at least one parameter (the receiver).
-  // If {parameter_count} == 0, it means it is a builtin with
+  // If {parameter_slots} == 0, it means it is a builtin with
   // kDontAdaptArgumentsSentinel, which takes care of JS arguments popping
   // itself.
   const bool drop_jsargs = frame_access_state()->has_frame() &&
                            call_descriptor->IsJSFunctionCall() &&
-                           parameter_count != 0;
+                           parameter_slots != 0;
 
   if (call_descriptor->IsCFunctionCall()) {
     AssembleDeconstructFrame();
@@ -2486,11 +2554,11 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
   }
   if (drop_jsargs) {
     // We must pop all arguments from the stack (including the receiver). This
-    // number of arguments is given by max(1 + argc_reg, parameter_count).
+    // number of arguments is given by max(1 + argc_reg, parameter_slots).
     __ Add64(t0, t0, Operand(1));  // Also pop the receiver.
-    if (parameter_count > 1) {
+    if (parameter_slots > 1) {
       Label done;
-      __ li(kScratchReg, parameter_count);
+      __ li(kScratchReg, parameter_slots);
       __ Branch(&done, ge, t0, Operand(kScratchReg));
       __ Move(t0, kScratchReg);
       __ bind(&done);
@@ -2501,17 +2569,17 @@ void CodeGenerator::AssembleReturn(InstructionOperand* additional_pop_count) {
     // it should be a kInt32 or a kInt64
     DCHECK_LE(g.ToConstant(additional_pop_count).type(), Constant::kInt64);
     int additional_count = g.ToConstant(additional_pop_count).ToInt32();
-    __ Drop(parameter_count + additional_count);
+    __ Drop(parameter_slots + additional_count);
   } else {
     Register pop_reg = g.ToRegister(additional_pop_count);
-    __ Drop(parameter_count);
+    __ Drop(parameter_slots);
     __ Sll64(pop_reg, pop_reg, kSystemPointerSizeLog2);
     __ Add64(sp, sp, pop_reg);
   }
   __ Ret();
 }
 
-void CodeGenerator::FinishCode() {}
+void CodeGenerator::FinishCode() { __ ForceConstantPoolEmissionWithoutJump(); }
 
 void CodeGenerator::PrepareForDeoptimizationExits(
     ZoneDeque<DeoptimizationExit*>* exits) {}

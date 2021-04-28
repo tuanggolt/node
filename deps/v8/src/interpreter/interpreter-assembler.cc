@@ -8,7 +8,7 @@
 #include <ostream>
 
 #include "src/codegen/code-factory.h"
-#include "src/codegen/interface-descriptors.h"
+#include "src/codegen/interface-descriptors-inl.h"
 #include "src/codegen/machine-type.h"
 #include "src/execution/frames.h"
 #include "src/interpreter/bytecodes.h"
@@ -1328,6 +1328,34 @@ void InterpreterAssembler::MaybeDropFrames(TNode<Context> context) {
   Goto(&ok);
 
   BIND(&ok);
+}
+
+void InterpreterAssembler::OnStackReplacement(TNode<Context> context,
+                                              TNode<IntPtrT> relative_jump) {
+  TNode<JSFunction> function = CAST(LoadRegister(Register::function_closure()));
+  TNode<HeapObject> shared_info = LoadJSFunctionSharedFunctionInfo(function);
+  TNode<Object> sfi_data =
+      LoadObjectField(shared_info, SharedFunctionInfo::kFunctionDataOffset);
+  TNode<Uint16T> data_type = LoadInstanceType(CAST(sfi_data));
+
+  Label baseline(this);
+  GotoIf(InstanceTypeEqual(data_type, BASELINE_DATA_TYPE), &baseline);
+  {
+    Callable callable = CodeFactory::InterpreterOnStackReplacement(isolate());
+    CallStub(callable, context);
+    JumpBackward(relative_jump);
+  }
+
+  BIND(&baseline);
+  {
+    Callable callable =
+        CodeFactory::InterpreterOnStackReplacement_ToBaseline(isolate());
+    // We already compiled the baseline code, so we don't need to handle failed
+    // compilation as in the Ignition -> Turbofan case. Therefore we can just
+    // tailcall to the OSR builtin.
+    SaveBytecodeOffset();
+    TailCallStub(callable, context);
+  }
 }
 
 void InterpreterAssembler::TraceBytecode(Runtime::FunctionId function_id) {

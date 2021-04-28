@@ -351,9 +351,6 @@ int Sweeper::RawSweep(
   size_t live_bytes = 0;
   size_t max_freed_bytes = 0;
 
-  // TODO(ulan): we don't have to clear type old-to-old slots in code space
-  // because the concurrent marker doesn't mark code objects. This requires
-  // the write barrier for code objects to check the color of the code object.
   bool non_empty_typed_slots = p->typed_slot_set<OLD_TO_NEW>() != nullptr ||
                                p->typed_slot_set<OLD_TO_OLD>() != nullptr;
 
@@ -394,6 +391,7 @@ int Sweeper::RawSweep(
           &old_to_new_cleanup);
     }
     Map map = object.synchronized_map();
+    DCHECK(map.IsMap());
     int size = object.SizeFromMap(map);
     live_bytes += size;
     free_start = free_end + size;

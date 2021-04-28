@@ -152,6 +152,7 @@
   V(_, CompileError_string, "CompileError")                          \
   V(_, callee_string, "callee")                                      \
   V(_, caller_string, "caller")                                      \
+  V(_, cause_string, "cause")                                        \
   V(_, character_string, "character")                                \
   V(_, closure_string, "(closure)")                                  \
   V(_, code_string, "code")                                          \
@@ -349,6 +350,7 @@
   V(_, error_start_pos_symbol)                 \
   V(_, frozen_symbol)                          \
   V(_, interpreter_trampoline_symbol)          \
+  V(_, mega_dom_symbol)                        \
   V(_, megamorphic_symbol)                     \
   V(_, native_context_index_symbol)            \
   V(_, nonextensible_symbol)                   \
@@ -517,6 +519,8 @@
   F(BACKGROUND_FULL_ARRAY_BUFFER_SWEEP)           \
   F(BACKGROUND_COLLECTION)                        \
   F(BACKGROUND_UNMAPPER)                          \
+  F(BACKGROUND_UNPARK)                            \
+  F(BACKGROUND_SAFEPOINT)                         \
   F(MC_BACKGROUND_EVACUATE_COPY)                  \
   F(MC_BACKGROUND_EVACUATE_UPDATE_POINTERS)       \
   F(MC_BACKGROUND_MARKING)                        \

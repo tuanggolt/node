@@ -127,6 +127,13 @@ struct FieldAccess {
 #endif
   {
     DCHECK_GE(offset, 0);
+    DCHECK_IMPLIES(
+        machine_type.IsMapWord(),
+        offset == HeapObject::kMapOffset && base_is_tagged != kUntaggedBase);
+    DCHECK_IMPLIES(machine_type.IsMapWord(),
+                   (write_barrier_kind == kMapWriteBarrier ||
+                    write_barrier_kind == kNoWriteBarrier ||
+                    write_barrier_kind == kAssertNoWriteBarrier));
   }
 
   int tag() const { return base_is_tagged == kTaggedBase ? kHeapObjectTag : 0; }
@@ -599,6 +606,30 @@ bool operator==(NumberOperationParameters const&,
 const NumberOperationParameters& NumberOperationParametersOf(const Operator* op)
     V8_WARN_UNUSED_RESULT;
 
+class SpeculativeBigIntAsUintNParameters {
+ public:
+  SpeculativeBigIntAsUintNParameters(int bits, const FeedbackSource& feedback)
+      : bits_(bits), feedback_(feedback) {
+    DCHECK_GE(bits_, 0);
+    DCHECK_LE(bits_, 64);
+  }
+
+  int bits() const { return bits_; }
+  const FeedbackSource& feedback() const { return feedback_; }
+
+ private:
+  int bits_;
+  FeedbackSource feedback_;
+};
+
+size_t hash_value(SpeculativeBigIntAsUintNParameters const&);
+V8_EXPORT_PRIVATE std::ostream& operator<<(
+    std::ostream&, const SpeculativeBigIntAsUintNParameters&);
+bool operator==(SpeculativeBigIntAsUintNParameters const&,
+                SpeculativeBigIntAsUintNParameters const&);
+const SpeculativeBigIntAsUintNParameters& SpeculativeBigIntAsUintNParametersOf(
+    const Operator* op) V8_WARN_UNUSED_RESULT;
+
 int FormalParameterCountOf(const Operator* op) V8_WARN_UNUSED_RESULT;
 
 class AllocateParameters {
@@ -806,7 +837,8 @@ class V8_EXPORT_PRIVATE SimplifiedOperatorBuilder final
   const Operator* SpeculativeBigIntAdd(BigIntOperationHint hint);
   const Operator* SpeculativeBigIntSubtract(BigIntOperationHint hint);
   const Operator* SpeculativeBigIntNegate(BigIntOperationHint hint);
-  const Operator* BigIntAsUintN(int bits);
+  const Operator* SpeculativeBigIntAsUintN(int bits,
+                                           const FeedbackSource& feedback);
 
   const Operator* ReferenceEqual();
   const Operator* SameValue();

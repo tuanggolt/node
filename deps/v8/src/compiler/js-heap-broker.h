@@ -19,7 +19,7 @@
 #include "src/handles/persistent-handles.h"
 #include "src/heap/local-heap.h"
 #include "src/heap/parked-scope.h"
-#include "src/interpreter/bytecode-array-accessor.h"
+#include "src/interpreter/bytecode-array-iterator.h"
 #include "src/objects/code-kind.h"
 #include "src/objects/feedback-vector.h"
 #include "src/objects/function-kind.h"
@@ -106,7 +106,8 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   bool is_concurrent_inlining() const { return is_concurrent_inlining_; }
   bool is_isolate_bootstrapping() const { return is_isolate_bootstrapping_; }
   bool is_native_context_independent() const {
-    return code_kind_ == CodeKind::NATIVE_CONTEXT_INDEPENDENT;
+    // TODO(jgruber,v8:8888): Remove dependent code.
+    return false;
   }
   bool generate_full_feedback_collection() const {
     // NCI code currently collects full feedback.
@@ -145,7 +146,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   void PrintRefsAnalysis() const;
 #endif  // DEBUG
 
-  // Retruns the handle from root index table for read only heap objects.
+  // Returns the handle from root index table for read only heap objects.
   Handle<Object> GetRootHandle(Object object);
 
   // Never returns nullptr.
@@ -164,10 +165,15 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
       Handle<Object>, bool crash_on_error = false,
       ObjectRef::BackgroundSerialization background_serialization =
           ObjectRef::BackgroundSerialization::kDisallowed);
+  ObjectData* TryGetOrCreateData(
+      Object object, bool crash_on_error = false,
+      ObjectRef::BackgroundSerialization background_serialization =
+          ObjectRef::BackgroundSerialization::kDisallowed);
 
   // Check if {object} is any native context's %ArrayPrototype% or
   // %ObjectPrototype%.
   bool IsArrayOrObjectPrototype(const JSObjectRef& object) const;
+  bool IsArrayOrObjectPrototype(Handle<JSObject> object) const;
 
   bool HasFeedback(FeedbackSource const& source) const;
   void SetFeedback(FeedbackSource const& source,
@@ -240,6 +246,25 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
       FeedbackSource const& source,
       SerializationPolicy policy = SerializationPolicy::kAssumeSerialized);
 
+  // Used to separate the problem of a concurrent GetPropertyAccessInfo (GPAI)
+  // from serialization. GPAI is currently called both during the serialization
+  // phase, and on the background thread. While some crucial objects (like
+  // JSObject) still must be serialized, we do the following:
+  // - Run GPAI during serialization to discover and serialize required objects.
+  // - After the serialization phase, clear cached property access infos.
+  // - On the background thread, rerun GPAI in a concurrent setting. The cache
+  //   has been cleared, thus the actual logic runs again.
+  // Once all required object kinds no longer require serialization, this
+  // should be removed together with all GPAI calls during serialization.
+  void ClearCachedPropertyAccessInfos() {
+    CHECK(FLAG_turbo_concurrent_get_property_access_info);
+    property_access_infos_.clear();
+  }
+
+  // As above, clear cached ObjectData that can be reconstructed, i.e. is
+  // either never-serialized or background-serialized.
+  void ClearReconstructibleData();
+
   StringRef GetTypedArrayStringTag(ElementsKind kind);
 
   bool ShouldBeSerializedForCompilation(const SharedFunctionInfoRef& shared,
@@ -251,7 +276,19 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   bool IsSerializedForCompilation(const SharedFunctionInfoRef& shared,
                                   const FeedbackVectorRef& feedback) const;
 
+  bool IsMainThread() const {
+    return local_isolate() == nullptr || local_isolate()->is_main_thread();
+  }
+
   LocalIsolate* local_isolate() const { return local_isolate_; }
+
+  // TODO(jgruber): Consider always having local_isolate_ set to a real value.
+  // This seems not entirely trivial since we currently reset local_isolate_ to
+  // nullptr at some point in the JSHeapBroker lifecycle.
+  LocalIsolate* local_isolate_or_isolate() const {
+    return local_isolate() != nullptr ? local_isolate()
+                                      : isolate()->AsLocalIsolate();
+  }
 
   // Return the corresponding canonical persistent handle for {object}. Create
   // one if it does not exist.
@@ -287,6 +324,7 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
 
   template <typename T>
   Handle<T> CanonicalPersistentHandle(Handle<T> object) {
+    if (object.is_null()) return object;  // Can't deref a null handle.
     return CanonicalPersistentHandle<T>(*object);
   }
 
@@ -309,15 +347,34 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
 
   RootIndexMap const& root_index_map() { return root_index_map_; }
 
+  class MapUpdaterMutexDepthScope final {
+   public:
+    explicit MapUpdaterMutexDepthScope(JSHeapBroker* ptr)
+        : ptr_(ptr),
+          initial_map_updater_mutex_depth_(ptr->map_updater_mutex_depth_) {
+      ptr_->map_updater_mutex_depth_++;
+    }
+
+    ~MapUpdaterMutexDepthScope() {
+      ptr_->map_updater_mutex_depth_--;
+      DCHECK_EQ(initial_map_updater_mutex_depth_,
+                ptr_->map_updater_mutex_depth_);
+    }
+
+    // Whether the MapUpdater mutex should be physically locked (if not, we
+    // already hold the lock).
+    bool should_lock() const { return initial_map_updater_mutex_depth_ == 0; }
+
+   private:
+    JSHeapBroker* const ptr_;
+    const int initial_map_updater_mutex_depth_;
+  };
+
  private:
   friend class HeapObjectRef;
   friend class ObjectRef;
   friend class ObjectData;
   friend class PropertyCellData;
-
-  bool IsMainThread() const {
-    return local_isolate() == nullptr || local_isolate()->is_main_thread();
-  }
 
   // If this returns false, the object is guaranteed to be fully initialized and
   // thus safe to read from a memory safety perspective. The converse does not
@@ -427,9 +484,19 @@ class V8_EXPORT_PRIVATE JSHeapBroker {
   };
   ZoneMultimap<SerializedFunction, HintsVector> serialized_functions_;
 
-  static const size_t kMaxSerializedFunctionsCacheSize = 200;
-  static const uint32_t kMinimalRefsBucketCount = 8;     // must be power of 2
-  static const uint32_t kInitialRefsBucketCount = 1024;  // must be power of 2
+  // The MapUpdater mutex is used in recursive patterns; for example,
+  // ComputePropertyAccessInfo may call itself recursively. Thus we need to
+  // emulate a recursive mutex, which we do by checking if this heap broker
+  // instance already holds the mutex when a lock is requested. This field
+  // holds the locking depth, i.e. how many times the mutex has been
+  // recursively locked. Only the outermost locker actually locks underneath.
+  int map_updater_mutex_depth_ = 0;
+
+  static constexpr size_t kMaxSerializedFunctionsCacheSize = 200;
+  static constexpr uint32_t kMinimalRefsBucketCount = 8;
+  STATIC_ASSERT(base::bits::IsPowerOfTwo(kMinimalRefsBucketCount));
+  static constexpr uint32_t kInitialRefsBucketCount = 1024;
+  STATIC_ASSERT(base::bits::IsPowerOfTwo(kInitialRefsBucketCount));
 };
 
 class V8_NODISCARD TraceScope {

@@ -9,7 +9,6 @@
 #include "src/heap/gc-tracer.h"
 #include "src/heap/heap-inl.h"
 #include "src/heap/invalidated-slots-inl.h"
-#include "src/heap/item-parallel-job.h"
 #include "src/heap/mark-compact-inl.h"
 #include "src/heap/memory-chunk-inl.h"
 #include "src/heap/objects-visiting-inl.h"
@@ -18,6 +17,7 @@
 #include "src/heap/sweeper.h"
 #include "src/objects/data-handler-inl.h"
 #include "src/objects/embedder-data-array-inl.h"
+#include "src/objects/js-array-buffer-inl.h"
 #include "src/objects/objects-body-descriptors-inl.h"
 #include "src/objects/transitions-inl.h"
 #include "src/utils/utils-inl.h"
@@ -384,6 +384,10 @@ void ScavengerCollector::CollectGarbage() {
         &Heap::UpdateYoungReferenceInExternalStringTableEntry);
 
     heap_->incremental_marking()->UpdateMarkingWorklistAfterScavenge();
+
+    if (V8_UNLIKELY(FLAG_track_retaining_path)) {
+      heap_->UpdateRetainersAfterScavenge();
+    }
   }
 
   if (FLAG_concurrent_marking) {
@@ -734,6 +738,7 @@ void Scavenger::AddEphemeronHashTable(EphemeronHashTable table) {
 void RootScavengeVisitor::VisitRootPointer(Root root, const char* description,
                                            FullObjectSlot p) {
   DCHECK(!HasWeakHeapObjectTag(*p));
+  DCHECK(!MapWord::IsPacked((*p).ptr()));
   ScavengePointer(p);
 }
 
@@ -741,12 +746,15 @@ void RootScavengeVisitor::VisitRootPointers(Root root, const char* description,
                                             FullObjectSlot start,
                                             FullObjectSlot end) {
   // Copy all HeapObject pointers in [start, end)
-  for (FullObjectSlot p = start; p < end; ++p) ScavengePointer(p);
+  for (FullObjectSlot p = start; p < end; ++p) {
+    ScavengePointer(p);
+  }
 }
 
 void RootScavengeVisitor::ScavengePointer(FullObjectSlot p) {
   Object object = *p;
   DCHECK(!HasWeakHeapObjectTag(object));
+  DCHECK(!MapWord::IsPacked(object.ptr()));
   if (Heap::InYoungGeneration(object)) {
     scavenger_->ScavengeObject(FullHeapObjectSlot(p), HeapObject::cast(object));
   }

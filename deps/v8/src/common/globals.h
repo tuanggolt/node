@@ -99,11 +99,25 @@ STATIC_ASSERT(V8_DEFAULT_STACK_SIZE_KB* KB +
                   kStackLimitSlackForDeoptimizationInBytes <=
               MB);
 
+// Determine whether the short builtin calls optimization is enabled.
+#ifdef V8_SHORT_BUILTIN_CALLS
+#ifndef V8_COMPRESS_POINTERS_IN_ISOLATE_CAGE
+// TODO(11527): Fix this by passing Isolate* to Code::OffHeapInstructionStart()
+// and friends.
+#error Short builtin calls feature require pointer compression with per- \
+       Isolate cage
+#endif
+#endif
+
+// This constant is used for detecting whether the machine has >= 4GB of
+// physical memory by checking the max old space size.
+const size_t kShortBuiltinCallsOldSpaceSizeThreshold = size_t{2} * GB;
+
 // Determine whether dict mode prototypes feature is enabled.
-#ifdef V8_DICT_MODE_PROTOTYPES
-#define V8_DICT_MODE_PROTOTYPES_BOOL true
+#ifdef V8_ENABLE_SWISS_NAME_DICTIONARY
+#define V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL true
 #else
-#define V8_DICT_MODE_PROTOTYPES_BOOL false
+#define V8_ENABLE_SWISS_NAME_DICTIONARY_BOOL false
 #endif
 
 // Determine whether dict property constness tracking feature is enabled.
@@ -196,6 +210,15 @@ constexpr int kElidedFrameSlots = 0;
 #endif
 
 constexpr int kDoubleSizeLog2 = 3;
+// The maximal length of the string representation for a double value
+// (e.g. "-2.2250738585072020E-308"). It is composed as follows:
+// - 17 decimal digits, see kBase10MaximalLength (dtoa.h)
+// - 1 sign
+// - 1 decimal point
+// - 1 E or e
+// - 1 exponent sign
+// - 3 exponent
+constexpr int kMaxDoubleStringLength = 24;
 
 // Total wasm code space per engine (i.e. per process) is limited to make
 // certain attacks that rely on heap spraying harder.
@@ -867,6 +890,8 @@ enum InlineCacheState {
   RECOMPUTE_HANDLER,
   // Multiple receiver types have been seen.
   POLYMORPHIC,
+  // Many DOM receiver types have been seen for the same accessor.
+  MEGADOM,
   // Many receiver types have been seen.
   MEGAMORPHIC,
   // A generic handler is installed and no extra typefeedback is recorded.
@@ -888,6 +913,8 @@ inline const char* InlineCacheState2String(InlineCacheState state) {
       return "POLYMORPHIC";
     case MEGAMORPHIC:
       return "MEGAMORPHIC";
+    case MEGADOM:
+      return "MEGADOM";
     case GENERIC:
       return "GENERIC";
   }
@@ -1694,7 +1721,9 @@ enum IcCheckType { ELEMENT, PROPERTY };
 //    without going through the on-heap Code trampoline.
 enum class StubCallMode {
   kCallCodeObject,
+#if V8_ENABLE_WEBASSEMBLY
   kCallWasmRuntimeStub,
+#endif  // V8_ENABLE_WEBASSEMBLY
   kCallBuiltinPointer,
 };
 
@@ -1733,27 +1762,31 @@ enum class DynamicCheckMapsStatus : uint8_t {
 };
 
 #ifdef V8_COMPRESS_POINTERS
-class IsolateRoot {
+class PtrComprCageBase {
  public:
-  explicit constexpr IsolateRoot(Address address) : address_(address) {}
+  explicit constexpr PtrComprCageBase(Address address) : address_(address) {}
   // NOLINTNEXTLINE
-  inline IsolateRoot(const Isolate* isolate);
+  inline PtrComprCageBase(const Isolate* isolate);
   // NOLINTNEXTLINE
-  inline IsolateRoot(const LocalIsolate* isolate);
+  inline PtrComprCageBase(const LocalIsolate* isolate);
 
   inline Address address() const;
+
+  bool operator==(const PtrComprCageBase& other) const {
+    return address_ == other.address_;
+  }
 
  private:
   Address address_;
 };
 #else
-class IsolateRoot {
+class PtrComprCageBase {
  public:
-  IsolateRoot() = default;
+  PtrComprCageBase() = default;
   // NOLINTNEXTLINE
-  IsolateRoot(const Isolate* isolate) {}
+  PtrComprCageBase(const Isolate* isolate) {}
   // NOLINTNEXTLINE
-  IsolateRoot(const LocalIsolate* isolate) {}
+  PtrComprCageBase(const LocalIsolate* isolate) {}
 };
 #endif
 
